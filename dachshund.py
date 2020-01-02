@@ -8,88 +8,193 @@ import json
 import urllib.parse
 import email.utils
 import time
+from difflib import SequenceMatcher
+import asyncio 
+import aiohttp
+from aiohttp import ClientSession
 
-install_dir = os.path.dirname(os.path.realpath(__file__))
-userhome = expanduser("~")
-maindir = userhome + "/.dachshund/"
 
-# check for maindir
-'''if not os.path.exists(maindir):
+async def dlnzb(session, url, querystr):
+    #async with session.get("www.google.at", headers={'User-Agent': 'Mozilla/5.0'}) as response:
+    #    return await response.read()
+    async with session.get(url) as response:
+        return await response.read()
+        
+
+class Indexer:
+    def __init__(self, name, url, apikey):
+        self.name = name
+        self.url = url
+        self.apikey = apikey
+        self.search_url = url + "/api?t=search&apikey=" + self.apikey + "&o=json&q="
+        self.details_url = url + "/api?t=details&apikey=" + self.apikey + "&o=json&id="
+        self.search1_result = None
+        self.search2_result = None
+
+    def search_firstpass(self, session, querystr):
+        querystr_rfc = urllib.parse.quote(querystr)
+        url = self.search_url + querystr_rfc
+        # req = urllib.request.Request(url, headers={'User-Agent': 'Mozilla/5.0'})
+        # result = urllib.request.urlopen(req).read()
+        #async with session.get(url, headers={'User-Agent': 'Mozilla/5.0'}) as response:
+        #    self.search1_result = await response.read()
+        # self.search1_result = json.loads(result)
+
+    def search_2ndpass(self):
+        if not self.search1_result:
+            return None
+        resultlist = []
+        try:
+            res_items = self.search1_result["channel"]["item"]
+        except Exception:
+            res_items = self.search1_result["item"]
+        res_count = 0
+        for r in res_items:
+            result = {}
+            title = r["title"]
+            try:
+                enclosure = r["enclosure"]["@attributes"]
+                nzburl = enclosure["url"]
+                length = int(enclosure["length"])
+            except Exception:
+                enclosure = r["enclosure"]
+                nzburl = enclosure["_url"]
+                length = int(enclosure["_length"])
+            age = int((time.time() - time.mktime(email.utils.parsedate(r["pubDate"])))/(3600*24))
+
+            # check for sameness
+            resultlist_copy = resultlist[:]
+            keepresult = True
+            for r0 in resultlist:
+                c = SequenceMatcher(None, title, r0["title"]).ratio()
+                age_diff = abs(age - (r0["age"]))
+                len_diff = abs(length / r0["length"] - 1)
+                if c > 0.80 and age_diff < 180 and len_diff < 0.03:
+                    if age < r0["age"]:
+                        resultlist_copy.remove(r0)
+                    else:
+                        keepresult = False
+            resultlist = resultlist_copy[:]
+            if not keepresult:
+                continue
+
+            res_count += 1
+            result["title"] = r["title"]
+            result["age"] = int((time.time() - time.mktime(email.utils.parsedate(r["pubDate"])))/(3600*24))
+            result["description"] = r["description"]
+            result["nzburl"] = nzburl
+            result["length"] = length
+
+            try:
+                # nzb.su
+                attrs = r["attr"] 
+                result["categorylist"] = []
+                result["size"] = "-"
+                result["guid"] = "-"
+                result["hash"] = "-"
+                for a in attrs:
+                    a0 = a["@attributes"]
+                    if a0["name"] == "category":
+                        result["categorylist"].append(a0["value"])
+                    if a0["name"] == "size":
+                        result["size"] = int(a0["value"])
+                    if a0["name"] == "guid":
+                        result["guid"] = a0["value"]
+                    if a0["name"] == "hash":
+                        result["hash"] = a0["value"]
+            except Exception:
+                # drunkenslug
+                attrs = r["newznab:attr"]
+                result["categorylist"] = []
+                result["size"] = "-"
+                result["guid"] = "-"
+                result["hash"] = "-"
+                for a in attrs:
+                    if a["_name"] == "category":
+                        result["categorylist"].append(a["_value"])
+                    if a["_name"] == "size":
+                        result["size"] = int(a["_value"])
+                result["guid"] = r["guid"]["text"].split("details/")[-1]
+            resultlist.append(result)
+            
+        return res_count, resultlist
+
+
+def read_config(cfg_file):
     try:
-        os.mkdir(maindir)
+        cfg = configparser.ConfigParser()
+        cfg.read(cfg_file)
     except Exception as e:
         print(str(e))
-        sys.exit()'''
+        return None
+    idx = 1
+    indexerlist = []
+    while True:
+        try:
+            idxstr = "INDEXER" + str(idx)
+            idx_name = cfg[idxstr]["name"]
+            idx_url = cfg[idxstr]["url"]
+            idx_apikey = cfg[idxstr]["apikey"]
+            indexer = Indexer(idx_name, idx_url, idx_apikey)
+            indexerlist.append(indexer)
+        except Exception:
+            break
+        idx += 1
+    return indexerlist
 
-try:
+
+async def dl_async(x):
+    install_dir = os.path.dirname(os.path.realpath(__file__))
+    userhome = expanduser("~")
+    maindir = userhome + "/.dachshund/"
     cfg_file = maindir + "dachshund.config"
-    cfg = configparser.ConfigParser()
-    cfg.read(cfg_file)
-except Exception as e:
-    print(str(e))
-    sys.exit()
+    indexerlist = read_config(cfg_file)
+    if not indexerlist:
+        print("no indexers set up, exiting!")
+        return -1
 
-searchstr = "ubuntu 18"
-searchstr = urllib.parse.quote(searchstr)
-url = cfg["INDEXER"]["URL"] + "/api?t=search&apikey=" + cfg["INDEXER"]["APIKEY"] + "&o=json&q=" + searchstr
+    coros = []
+    query_str = "ubuntu 18"
 
-# url = "https://www.nzb.su/api?t=search&apikey=15f358c78ddf57aa0557ef5dd4b9157a&o=json&q=ubuntu"
-print(url)
-RESULTLIST = []
-hdr = {'User-Agent': 'Mozilla/5.0'}
-req = urllib.request.Request(url, headers=hdr)
-result = urllib.request.urlopen(req).read()
-result = json.loads(result)
+    async with aiohttp.ClientSession() as session:
+        for indexer in indexerlist:
+            coros.append(asyncio.Task(dlnzb(session, 'http://python.org', "")))
+    responses = await asyncio.gather(*coros)
 
-nr_results = result["channel"]["response"]["@attributes"]["total"]
+    #async with ClientSession() as session:
+    #    for indexer in indexerlist:
+    #        querystr_rfc = urllib.parse.quote(query_str)
+    #        url = indexer.search_url + querystr_rfc
+    #        coros.append(asyncio.Task(dlnzb(session, url, querystr_rfc)))
+    #responses = await asyncio.gather(*coros)
 
-print(nr_results + " results found")
-res_items = result["channel"]["item"]
-i = 1
-for r in res_items:
-    print("### RESULT #" + str(i))
-    i += 1
-    title = r["title"]
-    link = r["link"]
-    guid = r["guid"]
-    comments = r["comments"]
-    pubdate = r["pubDate"]
-    category = r["category"]
-    description = r["description"]
-    t1 = int((time.time() - time.mktime(email.utils.parsedate(pubdate)))/(3600*24))
-    title_in_resultlist = len([(ti0, t10) for ti0, t10 in RESULTLIST if ti0 == title]) > 0
-    if title_in_resultlist:
-        print("------- GIBTS SCHON -------")
-    RESULTLIST.append((title, t1))
 
-    enclosure = r["enclosure"]["@attributes"]
-    nzburl = enclosure["url"]
-    length = enclosure["length"]
+def run():
+    #install_dir = os.path.dirname(os.path.realpath(__file__))
+    #userhome = expanduser("~")
+    #maindir = userhome + "/.dachshund/"
 
-    attr_categorylist = []
-    attr_size = "-"
-    attr_guid = "-"
-    for a in r["attr"]:
-        a0 = a["@attributes"]
-        if a0["name"] == "category":
-            attr_categorylist.append(a0["value"])
-        if a0["name"] == "size":
-            attr_size = a0["value"]
-        if a0["name"] == "guid":
-            attr_guid = a0["value"]
-    
-    print("Title:", title)
-    print("link:", link)
-    print("pubdate", pubdate)
-    print("category", category)
-    print("guid", guid)
-    print("description:", description)
-    print("Enclosure nzburl, length:", nzburl, length)
-    print("category - size - guid")
-    print(str(attr_categorylist) + " - " + attr_size + " + " + attr_guid)
-    print("")
+    #cfg_file = maindir + "dachshund.config"
+    #indexerlist = read_config(cfg_file)
+    #if not indexerlist:
+    #    print("no indexers set up, exiting!")
+    #    return -1
 
-    print("DETAILS")
+    loop = asyncio.get_event_loop()
+    loop.run_until_complete(dl_async(1))
+
+    #query_str = "ubuntu 18"
+    #for indexer in indexerlist:
+    #    indexer.search_firstpass(query_str)
+    #    res1_count, results1 = indexer.search_2ndpass()
+    #    print(indexer.name + ": " + str(res1_count) + " found!")
+    #    for r in results1:
+    #        length = str(int(r["length"] / (1024 * 1024))) + " MB"
+    #        size0 = str(int(r["size"] / (1024 * 1024))) + " MB"
+    #        print(r["title"] + "/ " + str(r["age"]) + " days" + " / " + length + " / " + size0)
+    #    print("-" * 80)
+
+    '''print("DETAILS")
     # http://servername.com/api?t=details&apikey=xxxxx&guid=xxxxxxxxx
     url2 = cfg["INDEXER"]["URL"] + "/api?t=details&apikey=" + cfg["INDEXER"]["APIKEY"] + "&o=json&id=" + attr_guid
     print(url2)
@@ -163,6 +268,8 @@ for r in res_items:
     print("pub Age", t1)
     print("Use Age", t2)
 
-    print("-" * 80)
+    print("-" * 80)'''
 
 
+if __name__ == "__main__":
+    run()
