@@ -12,6 +12,86 @@ from difflib import SequenceMatcher
 from dachshund import fetch
 import xml.etree.ElementTree as ET
 
+SAMENESS_SEQU_SENS = 0.8
+SAMENESS_AGE_SENS = 180
+SAMENESS_LEN_SENS = 0.03
+
+
+def truncate_middle(s, n):
+    if len(s) <= n:
+        # string is already short-enough
+        s = s + " " * (n - len(s))
+        return s
+    # half of the size, minus the 3 .'s
+    n_2 = int(int(n) / 2 - 3)
+    # whatever's left
+    n_1 = int(n - n_2 - 3)
+    return '{0}...{1}'.format(s[:n_1], s[-n_2:])
+
+
+def is_same(item1, item2):
+    sequ_ratio = SequenceMatcher(None, item1["title"], item2["title"]).ratio()
+    if sequ_ratio < SAMENESS_SEQU_SENS:
+        return False, True
+    age_diff = abs(item1["age"] - item2["age"])
+    len_diff = abs(item1["length"] / item2["length"] - 1)
+    is_same = False
+    keepresult = True
+    if age_diff < SAMENESS_AGE_SENS and len_diff < SAMENESS_LEN_SENS:
+        is_same = True
+        if item1["age"] < item2["age"]:
+            keepresult = True
+        else:
+            keepresult = False
+    return is_same, keepresult
+
+
+class NewsSearchResult:
+    def __init__(self, searchresultlist):
+        self.searchresultlist = searchresultlist
+        self.search2_result_raw = {}
+        self.check_for_sameness_clearup()
+
+    def check_for_sameness_clearup(self):
+        searchresultlist2 = self.searchresultlist[:]
+        res = []
+        for s in self.searchresultlist:
+            do_append = True
+            for s2 in searchresultlist2:
+                if s == s2:
+                    continue
+                issame, keepresult = is_same(s, s2)
+                if issame and not keepresult:
+                    do_append = False
+                    break
+            if do_append:
+                res.append(s)
+        # and sort by age
+        res = sorted(res, key=lambda tup: tup["age"])
+
+        self.searchresultlist = res
+
+    def print_search_results(self):
+        res = ""
+        for i, s in enumerate(self.searchresultlist):
+            nr = i + 1
+            ell_nr = truncate_middle("[" + str(nr) + "]", 5)
+            ell_title = truncate_middle(s["title"], 60)
+            ell_idx = truncate_middle(s["indexer"], 12)
+            ell_age = truncate_middle(str(s["age"]) + "d", 5)
+            size = s["length"]
+            if size < 1024:
+                ell_size = str(size) + "B"
+            elif size < 1024 * 1024:
+                ell_size = int(size / 1024) + "K"
+            elif size < 1024 * 1024 * 1024:
+                ell_size = "%.1f" % (size / (1024 * 1024)) + "M"
+            else:
+                ell_size = "%.2f" % (size / (1024 * 1024 * 1024)) + "G"
+            end = "\n" if nr < len(self.searchresultlist) else ""
+            res += ell_nr + ell_idx + " " + ell_title + " / " + ell_age + " / " + ell_size + end
+        return res
+
 
 class Indexer:
     def __init__(self, name, url, apikey):
@@ -21,26 +101,59 @@ class Indexer:
         self.all_search_url = ""
         self.details_url = ""
         self.search1_result = None
-        self.search2_result = None
+        self.search1_list = []
+        self.xmltree = None
 
     def build_all_search_url(self, qstr):
-        # self.all_search_url = self.url + "/api?t=search&apikey=" + self.apikey + "&o=json&q=" + qstr
         self.all_search_url = self.url + "/api?t=search&apikey=" + self.apikey + "&q=" + qstr
         return self.all_search_url
 
     def build_details_url(self, qstr):
-        # self.details_url = self.url + "/api?t=details&apikey=" + self.apikey + "&o=json&id=" + qstr
         self.details_url = self.url + "/api?t=details&apikey=" + self.apikey + "&id=" + qstr
         return self.details_url
 
-    def search_firstpass(self, session, querystr):
-        querystr_rfc = urllib.parse.quote(querystr)
-        url = self.search_url + querystr_rfc
-        # req = urllib.request.Request(url, headers={'User-Agent': 'Mozilla/5.0'})
-        # result = urllib.request.urlopen(req).read()
-        #async with session.get(url, headers={'User-Agent': 'Mozilla/5.0'}) as response:
-        #    self.search1_result = await response.read()
-        # self.search1_result = json.loads(result)
+    def get_xmltree_from_file(self, filename):
+        self.xmltree = ET.parse(filename).getroot()
+        return self.xmltree
+
+    def analyze_search1(self):
+        troot = self.xmltree
+        # sort into list of dicts(per title)
+        for item in troot.iter("item"):
+            itemdict = {}
+            itemdict["indexer"] = self.name
+            itemdict["categories"] = []
+            for d in item:
+                if d.tag == "pubDate":
+                    pubdate = d.text
+                    itemdict["age"] = int((time.time() - time.mktime(email.utils.parsedate(pubdate)))/(3600*24))
+                elif d.tag in ["title", "link", "guid", "category", "description", "comments"]:
+                    itemdict[d.tag] = d.text
+                elif d.tag == "enclosure":
+                    enclosure = d.attrib
+                    itemdict["url"] = enclosure["url"]
+                    itemdict["length"] = int(enclosure["length"])
+                    itemdict["type"] = enclosure["type"]
+                elif "attributes/}attr" in d.tag:
+                    if d.attrib["name"] == "size":
+                        itemdict[d.attrib["name"]] = int(d.attrib["value"])
+                    elif d.attrib["name"] == "category":
+                        itemdict["categories"].append(d.attrib["value"])
+                    else:
+                        itemdict[d.attrib["name"]] = d.attrib["value"]
+            # search for duplicates and remove older
+            itemdict["guid"] = itemdict["guid"].split("details/")[-1]
+            search_list1_copy = self.search1_list[:]
+            keepresult = True
+            for s in self.search1_list:
+                issame, keepresult = is_same(itemdict, s)
+                if issame and keepresult:
+                    search_list1_copy.remove(s)
+                elif issame and not keepresult:
+                    break
+            self.search1_list = search_list1_copy
+            if keepresult:
+                self.search1_list.append(itemdict)
 
     def search_2ndpass(self):
         if not self.search1_result:
@@ -118,7 +231,6 @@ class Indexer:
                         result["size"] = int(a["_value"])
                 result["guid"] = r["guid"]["text"].split("details/")[-1]
             resultlist.append(result)
-            
         return res_count, resultlist
 
 
@@ -130,7 +242,7 @@ def read_config(cfg_file):
         print(str(e))
         return None
     idx = 1
-    indexerlist = []
+    indexerdict = {}
     while True:
         try:
             idxstr = "INDEXER" + str(idx)
@@ -138,11 +250,11 @@ def read_config(cfg_file):
             idx_url = cfg[idxstr]["url"]
             idx_apikey = cfg[idxstr]["apikey"]
             indexer = Indexer(idx_name, idx_url, idx_apikey)
-            indexerlist.append(indexer)
+            indexerdict[idx_name] = indexer
         except Exception:
             break
         idx += 1
-    return indexerlist
+    return indexerdict
 
 
 def run():
@@ -151,56 +263,36 @@ def run():
     maindir = userhome + "/.dachshund/"
 
     cfg_file = maindir + "dachshund.config"
-    indexerlist = read_config(cfg_file)
-    if not indexerlist:
+    indexerdict = read_config(cfg_file)
+    if not indexerdict:
         print("no indexers set up, exiting!")
         return -1
 
+    # search and get xmltree
     qstr = "ubuntu 18"
     getfromfile = True
-    filedic = {}
-    treelist = []
-    for idx in indexerlist:
-        filedic[idx.name] = maindir + idx.name + "_" + qstr + ".xml"
 
     if not getfromfile:
-        print("downloading xml results ...")
-        qstr0 = qstr[:]
-        full_res, short_res = fetch.fetch_all_indexers(indexerlist, qstr0)
-        for f, s in zip(full_res, short_res):
-            idx, res = f
-            if res:
-                with open(filedic[idx], "wb") as xmlfile:
-                    xmlfile.write(res)
-                treelist.append((idx, ET.fromstring(res)))
+        fetch.fetch_all_indexers(indexerdict, qstr, maindir, writetofile=True)
     else:
-        print("getting xml results from files ...")
-        treelist = []
-        for idx, f in filedic.items():
-            treelist.append((idx, ET.parse(f).getroot()))
+        for idx_name, idx_obj in indexerdict.items():
+            filename = maindir + idx_name + "_" + qstr + ".xml"
+            idx_obj.get_xmltree_from_file(filename)
 
-    for tidx, troot in treelist:
-        print(tidx)
-        print(troot)
-        print(troot.tag, troot.attrib)
-        for item in troot.iter("item"):
-            print("***", item.tag)
-            for d in item:
-                if d.tag in ["title", "link", "pubDate", "guid", "category", "description", "comments"]:
-                    print("-->", d.tag + " - " + d.text)
-                elif d.tag == "enclosure":
-                    enclosure = d.attrib
-                    print("--> enclosure:")
-                    print("          url: " + enclosure["url"])
-                    print("       length: " + enclosure["length"])
-                    print("         type: " + enclosure["type"])
-                elif "attributes/}attr" in d.tag:
-                    print("--> attributes:")
-                    for key, elem in d.attrib.items():
-                        print("            ", key, elem)
-                    # print("          size")"+ " - " + str(d.attrib))
-        print("-" * 100)
-            
+    # merge into ONE search result list (of dict)
+    searchresult1 = []
+    for idx_name, idx_obj in indexerdict.items():
+        idx_obj.analyze_search1()
+        searchresult1.extend(idx_obj.search1_list)
+    nsr = NewsSearchResult(searchresult1)
+
+    # now get details of details
+    # fetch.fetch_all_guids(nsr, indexerdict)
+    resstr = nsr.print_search_results()
+    print(resstr)
+    
+
+
     # print(treelist)
 
     #query_str = "ubuntu 18"
