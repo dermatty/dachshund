@@ -11,6 +11,8 @@ import time
 from difflib import SequenceMatcher
 from dachshund import fetch
 import xml.etree.ElementTree as ET
+from furl import furl
+import xmlrpc.client
 
 SAMENESS_SEQU_SENS = 0.8
 SAMENESS_AGE_SENS = 180
@@ -68,13 +70,75 @@ class NewsSearchResult:
                 res.append(s)
         # and sort by age
         res = sorted(res, key=lambda tup: tup["age"])
-
         self.searchresultlist = res
 
-    def print_search_results(self):
+    def nzb_details(self, nzbnr0):
+        try:
+            nzbnr = int(nzbnr0)
+        except Exception:
+            return None
+        if nzbnr < 1 or nzbnr > len(self.searchresultlist):
+            return -1
+        nzb = self.searchresultlist[nzbnr-1]
+        return(nzb["title"])
+    
+    def nzbget_status(self):
+        f = furl()
+        f.host = "etec.iv.at"
+        f.scheme = "http"
+        f.port = 6789
+        f.username = "nzbget"
+        f.password = "tegbzn6789"
+        f.path.add("xmlrpc")
+        rpc = xmlrpc.client.ServerProxy(f.tostr())
+        rcode = rpc.status()
+        rcode2 = rpc.history()
+        print(rcode)
+        print(rcode2)
+        log = rpc.log(0, 10)
+        print("--->", log)
+
+    def download_nzb(self, nzbnr0):
+        try:
+            nzbnr = int(nzbnr0)
+        except Exception:
+            return None
+        if nzbnr < 1 or nzbnr > len(self.searchresultlist):
+            return -1
+        nzb = self.searchresultlist[nzbnr-1]
+        url = nzb["url"]
+        print(url)
+        
+        f = furl()
+        f.host = "etec.iv.at"
+        f.scheme = "http"
+        f.port = 6789
+        f.username = "nzbget"
+        f.password = "tegbzn6789"
+        f.path.add("xmlrpc")
+        print(f.tostr())
+        try:
+            title = nzb["title"]
+            rpc = xmlrpc.client.ServerProxy(f.tostr())
+            if not nzb["title"].endswith(".nzb"):
+                title += ".nzb"
+            rcode = rpc.append(title, nzb["url"], "", 0, False, False, "", 0, "SCORE", [])
+            self.rcode = int(rcode)
+            print(rcode)
+        except Exception as e:
+            print(e)
+            
+
+    def print_search_results(self, maxage=0, maxnr=0):
         res = ""
         for i, s in enumerate(self.searchresultlist):
             nr = i + 1
+            if maxnr > 0 and maxnr < nr:
+                res = res[:-2]
+                break
+            if maxage > 0 and maxage < s["age"]:
+                continue
+            res += "\n"
             ell_nr = truncate_middle("[" + str(nr) + "]", 5)
             ell_title = truncate_middle(s["title"], 60)
             ell_idx = truncate_middle(s["indexer"], 12)
@@ -88,8 +152,9 @@ class NewsSearchResult:
                 ell_size = "%.1f" % (size / (1024 * 1024)) + "M"
             else:
                 ell_size = "%.2f" % (size / (1024 * 1024 * 1024)) + "G"
-            end = "\n" if nr < len(self.searchresultlist) else ""
-            res += ell_nr + ell_idx + " " + ell_title + " / " + ell_age + " / " + ell_size + end
+            res += ell_nr + ell_idx + " " + ell_title + " / " + ell_age + " / " + ell_size
+        if res[:-1] == "\n":
+            res = res[:-2]
         return res
 
 
@@ -290,7 +355,26 @@ def run():
     # fetch.fetch_all_guids(nsr, indexerdict)
     resstr = nsr.print_search_results()
     print(resstr)
-    
+    while True:
+        print("d <nr>: details / dl <nr>: download nzb / l: list / s '...': search / t: toggle search ")
+        print("e!: exit / st: nzbget status")
+        msg_orig = input()
+        msg = msg_orig.lstrip()
+        if msg[:2] == "dl":
+            nzbnr = msg[2:].lstrip().rstrip()
+            print("downloading " + str(nzbnr))
+            print(nsr.download_nzb(nzbnr))
+        elif msg[:1] == "d":
+            nzbnr = msg[2:].lstrip().rstrip()
+            print(nsr.nzb_details(nzbnr))
+        elif msg[:2] == "e!":
+            break
+        elif msg[:1] == "l":
+            resstr = nsr.print_search_results()
+            print(resstr)
+        elif msg[:2] == "st":
+            nsr.nzbget_status()
+        print("-" * 80)
 
 
     # print(treelist)
