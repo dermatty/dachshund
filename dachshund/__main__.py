@@ -1,58 +1,151 @@
 #!/home/stephan/.virtualenvs/dh/bin/python
-import urllib.request
 from os.path import expanduser
 import os
-import sys
+import re
 import configparser
-import json
-import urllib.parse
 import email.utils
 import time
-from difflib import SequenceMatcher
-from dachshund import fetch
-import xml.etree.ElementTree as ET
 from furl import furl
+from dachshund import fetch, nzbget_status, is_same, make_pretty_bytes, truncate_middle, nzbget_history
+import xml.etree.ElementTree as ET
 import xmlrpc.client
-
-SAMENESS_SEQU_SENS = 0.8
-SAMENESS_AGE_SENS = 180
-SAMENESS_LEN_SENS = 0.03
-
-
-def truncate_middle(s, n):
-    if len(s) <= n:
-        # string is already short-enough
-        s = s + " " * (n - len(s))
-        return s
-    # half of the size, minus the 3 .'s
-    n_2 = int(int(n) / 2 - 3)
-    # whatever's left
-    n_1 = int(n - n_2 - 3)
-    return '{0}...{1}'.format(s[:n_1], s[-n_2:])
+from telegram.ext import Updater, MessageHandler, Filters
+import json
+import asyncio
 
 
-def is_same(item1, item2):
-    sequ_ratio = SequenceMatcher(None, item1["title"], item2["title"]).ratio()
-    if sequ_ratio < SAMENESS_SEQU_SENS:
-        return False, True
-    age_diff = abs(item1["age"] - item2["age"])
-    len_diff = abs(item1["length"] / item2["length"] - 1)
-    is_same = False
-    keepresult = True
-    if age_diff < SAMENESS_AGE_SENS and len_diff < SAMENESS_LEN_SENS:
-        is_same = True
-        if item1["age"] < item2["age"]:
-            keepresult = True
+class TelegramThread:
+    def __init__(self, cfg_file, maindir):
+        self.cfg_file = cfg_file
+        self.indexerdict, self.cfg = read_config(self.cfg_file)
+        self.maindir = maindir
+        self.running = False
+        self.token = self.cfg["TELEGRAM"]["TOKEN"]
+        self.chatids = json.loads(self.cfg.get("TELEGRAM", "CHATIDS"))
+
+    def start(self):
+        try:
+            self.updater = Updater(self.token, use_context=True)
+            self.dp = self.updater.dispatcher
+            self.bot = self.updater.bot
+            self.dp.add_handler(MessageHandler(Filters.text, self.handler))
+            self.updater.start_polling()
+            self.running = True
+            self.nsr = None
+            rep = "Welcome to dachshund v1.0 - usenet search & download telegram bot\n"
+            rep += 'd <nr>: details / dl <nr>: download nzb / l: list / s "...": search\n'
+            rep += "t: toggle search / e!: exit / st: nzbget status / h history\n"
+            self.send_message_all(rep)
+            return 1
+        except Exception:
+            self.token = None
+            self.chatids = None
+            self.running = False
+            return -1
+
+    def stop(self):
+        self.send_message_all("Stopping dachshund telegram bot, this may take a while ...")
+        self.updater.stop()
+        self.running = False
+
+    def send_message_all(self, text):
+        for c in self.chatids:
+            try:
+                self.bot.send_message(chat_id=c, text=text)
+            except Exception as e:
+                print(str(e))
+
+    def handler(self, update, context):
+        getfromfile = False
+        msg0 = update.message.text.lower()
+        msg = msg0.lstrip()
+        rep = ""
+        if msg[:2] == "dl" and self.nsr:
+            nzbnr = msg[2:].lstrip().rstrip()
+            rep += "downloading " + str(nzbnr) + "\n"
+            rep += self.nsr.download_nzb(nzbnr) + "\n"
+        if msg[:1] == "t" and self.nsr:
+            rep += self.nsr.toggle_sort() + "\n"
+        elif msg[:1] == "d" and self.nsr:
+            nzbnr = msg[2:].lstrip().rstrip()
+            rep += self.nsr.nzb_details(nzbnr) + "\n"
+        elif msg[:2] == "e!":
+            self.running = False
+        elif msg[:2] == "st":
+            rep += nzbget_status(self.maindir)
+        elif msg[:1] == "s":
+            try:
+                qstr = re.findall(r'"([^"]*)"', msg[1:])[0]
+                if not getfromfile:
+                    try:
+                        fetch.fetch_all_indexers(self.indexerdict, qstr, self.maindir, writetofile=True)
+                    except Exception as e:
+                        print(str(e))
+                else:
+                    for idx_name, idx_obj in self.indexerdict.items():
+                        filename = self.maindir + idx_name + "_" + qstr + ".xml"
+                        idx_obj.get_xmltree_from_file(filename)
+                # merge into ONE search result list (of dict)
+                searchresult1 = []
+                for idx_name, idx_obj in self.indexerdict.items():
+                    idx_obj.analyze_search1()
+                    searchresult1.extend(idx_obj.search1_list)
+                self.nsr = NewsSearchResult(searchresult1, self.maindir)
+                resstr = self.nsr.print_search_results()
+                rep += resstr
+            except Exception:
+                pass
+        elif msg[:1] == "l" and self.nsr:
+            resstr = self.nsr.print_search_results()
+            rep += resstr
+        elif msg[:1] == "h" and self.nsr:
+            rep += nzbget_history(self.nsr.rcodelist)
+        elif not self.nsr:
+            rep += "cannot execute as no search results available \n"
         else:
-            keepresult = False
-    return is_same, keepresult
+            rep += ("unknown command " + msg[:2] + "\n")
+        if msg[:2] != "e!":
+            rep += ("-" * 80 + "\n")
+            rep += 'd <nr>: details / dl <nr>: download nzb / l: list / s "...": search\n'
+            rep += "t: toggle search / e!: exit / st: nzbget status / h: history"
+        update.message.reply_text(rep)
 
 
 class NewsSearchResult:
-    def __init__(self, searchresultlist):
+    def __init__(self, searchresultlist, maindir):
         self.searchresultlist = searchresultlist
+        self.maindir = maindir
         self.search2_result_raw = {}
+        # 1 .. by age asc.
+        # 2 .. by age desc.
+        # 3 .. by size asc.
+        # 4 .. by size desc.
+        # 5 .. by indexer
+        # 6 .. by title
+        self.sort_toggle = 1
+        self.rcodelist = []
         self.check_for_sameness_clearup()
+
+    def sort_search_results(self):
+        if self.sort_toggle == 1:
+            self.searchresultlist = sorted(self.searchresultlist, key=lambda tup: tup["age"])
+        elif self.sort_toggle == 2:
+            self.searchresultlist = sorted(self.searchresultlist, key=lambda tup: tup["age"], reverse=True)
+        elif self.sort_toggle == 3:
+            self.searchresultlist = sorted(self.searchresultlist, key=lambda tup: tup["length"])
+        elif self.sort_toggle == 4:
+            self.searchresultlist = sorted(self.searchresultlist, key=lambda tup: tup["length"], reverse=True)
+        elif self.sort_toggle == 5:
+            self.searchresultlist = sorted(self.searchresultlist, key=lambda tup: tup["indexer"])
+        elif self.sort_toggle == 6:
+            self.searchresultlist = sorted(self.searchresultlist, key=lambda tup: tup["title"])
+
+    def toggle_sort(self):
+        self.sort_toggle = self.sort_toggle + 1
+        if self.sort_toggle > 6:
+            self.sort_toggle = 1
+        self.sort_search_results()
+        return self.print_search_results()
 
     def check_for_sameness_clearup(self):
         searchresultlist2 = self.searchresultlist[:]
@@ -69,8 +162,11 @@ class NewsSearchResult:
             if do_append:
                 res.append(s)
         # and sort by age
-        res = sorted(res, key=lambda tup: tup["age"])
-        self.searchresultlist = res
+        self.searchresultlist = res[:]
+        try:
+            self.sort_search_results()
+        except Exception as e:
+            print(str(e))
 
     def nzb_details(self, nzbnr0):
         try:
@@ -81,34 +177,15 @@ class NewsSearchResult:
             return -1
         nzb = self.searchresultlist[nzbnr-1]
         return(nzb["title"])
-    
-    def nzbget_status(self):
-        f = furl()
-        f.host = "etec.iv.at"
-        f.scheme = "http"
-        f.port = 6789
-        f.username = "nzbget"
-        f.password = "tegbzn6789"
-        f.path.add("xmlrpc")
-        rpc = xmlrpc.client.ServerProxy(f.tostr())
-        rcode = rpc.status()
-        rcode2 = rpc.history()
-        print(rcode)
-        print(rcode2)
-        log = rpc.log(0, 10)
-        print("--->", log)
 
     def download_nzb(self, nzbnr0):
         try:
             nzbnr = int(nzbnr0)
         except Exception:
-            return None
+            return ""
         if nzbnr < 1 or nzbnr > len(self.searchresultlist):
-            return -1
+            return ""
         nzb = self.searchresultlist[nzbnr-1]
-        url = nzb["url"]
-        print(url)
-        
         f = furl()
         f.host = "etec.iv.at"
         f.scheme = "http"
@@ -116,21 +193,41 @@ class NewsSearchResult:
         f.username = "nzbget"
         f.password = "tegbzn6789"
         f.path.add("xmlrpc")
-        print(f.tostr())
         try:
             title = nzb["title"]
             rpc = xmlrpc.client.ServerProxy(f.tostr())
             if not nzb["title"].endswith(".nzb"):
                 title += ".nzb"
             rcode = rpc.append(title, nzb["url"], "", 0, False, False, "", 0, "SCORE", [])
-            self.rcode = int(rcode)
-            print(rcode)
+            self.rcodelist.append((nzb["title"], rcode))
+            return nzb["title"]
         except Exception as e:
             print(e)
-            
+            return ""
 
     def print_search_results(self, maxage=0, maxnr=0):
-        res = ""
+        ell_nr = "#"
+        ell_title = "NZB NAME"
+        ell_idx = "INDEXER"
+        ell_age = "AGE"
+        ell_size = "SIZE"
+        if self.sort_toggle == 1:
+            ell_age += ">"
+        elif self.sort_toggle == 2:
+            ell_age += "<"
+        elif self.sort_toggle == 3:
+            ell_size += ">"
+        elif self.sort_toggle == 4:
+            ell_size += "<"
+        elif self.sort_toggle == 5:
+            ell_idx += ">"
+        elif self.sort_toggle == 6:
+            ell_title += ">"
+        ell_nr = truncate_middle(ell_nr, 5)
+        ell_title = truncate_middle(ell_title, 40)
+        ell_idx = truncate_middle(ell_idx, 12)
+        ell_age = truncate_middle(ell_age, 5)
+        res = ell_nr + ell_idx + " " + ell_title + " / " + ell_age + " / " + ell_size
         for i, s in enumerate(self.searchresultlist):
             nr = i + 1
             if maxnr > 0 and maxnr < nr:
@@ -140,19 +237,14 @@ class NewsSearchResult:
                 continue
             res += "\n"
             ell_nr = truncate_middle("[" + str(nr) + "]", 5)
-            ell_title = truncate_middle(s["title"], 60)
+            ell_title = truncate_middle(s["title"], 40)
             ell_idx = truncate_middle(s["indexer"], 12)
             ell_age = truncate_middle(str(s["age"]) + "d", 5)
             size = s["length"]
-            if size < 1024:
-                ell_size = str(size) + "B"
-            elif size < 1024 * 1024:
-                ell_size = int(size / 1024) + "K"
-            elif size < 1024 * 1024 * 1024:
-                ell_size = "%.1f" % (size / (1024 * 1024)) + "M"
-            else:
-                ell_size = "%.2f" % (size / (1024 * 1024 * 1024)) + "G"
+            ell_size = make_pretty_bytes(size)
             res += ell_nr + ell_idx + " " + ell_title + " / " + ell_age + " / " + ell_size
+            if nr > 30:
+                break
         if res[:-1] == "\n":
             res = res[:-2]
         return res
@@ -220,84 +312,6 @@ class Indexer:
             if keepresult:
                 self.search1_list.append(itemdict)
 
-    def search_2ndpass(self):
-        if not self.search1_result:
-            return None
-        resultlist = []
-        try:
-            res_items = self.search1_result["channel"]["item"]
-        except Exception:
-            res_items = self.search1_result["item"]
-        res_count = 0
-        for r in res_items:
-            result = {}
-            title = r["title"]
-            try:
-                enclosure = r["enclosure"]["@attributes"]
-                nzburl = enclosure["url"]
-                length = int(enclosure["length"])
-            except Exception:
-                enclosure = r["enclosure"]
-                nzburl = enclosure["_url"]
-                length = int(enclosure["_length"])
-            age = int((time.time() - time.mktime(email.utils.parsedate(r["pubDate"])))/(3600*24))
-
-            # check for sameness
-            resultlist_copy = resultlist[:]
-            keepresult = True
-            for r0 in resultlist:
-                c = SequenceMatcher(None, title, r0["title"]).ratio()
-                age_diff = abs(age - (r0["age"]))
-                len_diff = abs(length / r0["length"] - 1)
-                if c > 0.80 and age_diff < 180 and len_diff < 0.03:
-                    if age < r0["age"]:
-                        resultlist_copy.remove(r0)
-                    else:
-                        keepresult = False
-            resultlist = resultlist_copy[:]
-            if not keepresult:
-                continue
-
-            res_count += 1
-            result["title"] = r["title"]
-            result["age"] = int((time.time() - time.mktime(email.utils.parsedate(r["pubDate"])))/(3600*24))
-            result["description"] = r["description"]
-            result["nzburl"] = nzburl
-            result["length"] = length
-
-            try:
-                # nzb.su
-                attrs = r["attr"] 
-                result["categorylist"] = []
-                result["size"] = "-"
-                result["guid"] = "-"
-                result["hash"] = "-"
-                for a in attrs:
-                    a0 = a["@attributes"]
-                    if a0["name"] == "category":
-                        result["categorylist"].append(a0["value"])
-                    if a0["name"] == "size":
-                        result["size"] = int(a0["value"])
-                    if a0["name"] == "guid":
-                        result["guid"] = a0["value"]
-                    if a0["name"] == "hash":
-                        result["hash"] = a0["value"]
-            except Exception:
-                # drunkenslug
-                attrs = r["newznab:attr"]
-                result["categorylist"] = []
-                result["size"] = "-"
-                result["guid"] = "-"
-                result["hash"] = "-"
-                for a in attrs:
-                    if a["_name"] == "category":
-                        result["categorylist"].append(a["_value"])
-                    if a["_name"] == "size":
-                        result["size"] = int(a["_value"])
-                result["guid"] = r["guid"]["text"].split("details/")[-1]
-            resultlist.append(result)
-        return res_count, resultlist
-
 
 def read_config(cfg_file):
     try:
@@ -305,7 +319,7 @@ def read_config(cfg_file):
         cfg.read(cfg_file)
     except Exception as e:
         print(str(e))
-        return None
+        return None, None
     idx = 1
     indexerdict = {}
     while True:
@@ -319,151 +333,22 @@ def read_config(cfg_file):
         except Exception:
             break
         idx += 1
-    return indexerdict
+    return indexerdict, cfg
 
 
 def run():
-    install_dir = os.path.dirname(os.path.realpath(__file__))
+    # install_dir = os.path.dirname(os.path.realpath(__file__))
     userhome = expanduser("~")
     maindir = userhome + "/.dachshund/"
 
     cfg_file = maindir + "dachshund.config"
-    indexerdict = read_config(cfg_file)
-    if not indexerdict:
-        print("no indexers set up, exiting!")
-        return -1
 
-    # search and get xmltree
-    qstr = "ubuntu 18"
-    getfromfile = True
+    tgrm = TelegramThread(cfg_file, maindir)
+    tgrm.start()
 
-    if not getfromfile:
-        fetch.fetch_all_indexers(indexerdict, qstr, maindir, writetofile=True)
-    else:
-        for idx_name, idx_obj in indexerdict.items():
-            filename = maindir + idx_name + "_" + qstr + ".xml"
-            idx_obj.get_xmltree_from_file(filename)
-
-    # merge into ONE search result list (of dict)
-    searchresult1 = []
-    for idx_name, idx_obj in indexerdict.items():
-        idx_obj.analyze_search1()
-        searchresult1.extend(idx_obj.search1_list)
-    nsr = NewsSearchResult(searchresult1)
-
-    # now get details of details
-    # fetch.fetch_all_guids(nsr, indexerdict)
-    resstr = nsr.print_search_results()
-    print(resstr)
-    while True:
-        print("d <nr>: details / dl <nr>: download nzb / l: list / s '...': search / t: toggle search ")
-        print("e!: exit / st: nzbget status")
-        msg_orig = input()
-        msg = msg_orig.lstrip()
-        if msg[:2] == "dl":
-            nzbnr = msg[2:].lstrip().rstrip()
-            print("downloading " + str(nzbnr))
-            print(nsr.download_nzb(nzbnr))
-        elif msg[:1] == "d":
-            nzbnr = msg[2:].lstrip().rstrip()
-            print(nsr.nzb_details(nzbnr))
-        elif msg[:2] == "e!":
-            break
-        elif msg[:1] == "l":
-            resstr = nsr.print_search_results()
-            print(resstr)
-        elif msg[:2] == "st":
-            nsr.nzbget_status()
-        print("-" * 80)
-
-
-    # print(treelist)
-
-    #query_str = "ubuntu 18"
-    #for indexer in indexerlist:
-    #    indexer.search_firstpass(query_str)
-    #    res1_count, results1 = indexer.search_2ndpass()
-    #    print(indexer.name + ": " + str(res1_count) + " found!")
-    #    for r in results1:
-    #        length = str(int(r["length"] / (1024 * 1024))) + " MB"
-    #        size0 = str(int(r["size"] / (1024 * 1024))) + " MB"
-    #        print(r["title"] + "/ " + str(r["age"]) + " days" + " / " + length + " / " + size0)
-    #    print("-" * 80)
-
-    '''print("DETAILS")
-    # http://servername.com/api?t=details&apikey=xxxxx&guid=xxxxxxxxx
-    url2 = cfg["INDEXER"]["URL"] + "/api?t=details&apikey=" + cfg["INDEXER"]["APIKEY"] + "&o=json&id=" + attr_guid
-    print(url2)
-    hdr2 = {'User-Agent': 'Mozilla/5.0'}
-    req2 = urllib.request.Request(url2, headers=hdr2)
-    result2 = urllib.request.urlopen(req2).read()
-    result2 = json.loads(result2)
-    r1 = result2["channel"]["item"]
-    title2 = r1["title"]
-    link2 = r1["link"]
-    guid2 = r1["guid"]
-    comments2 = r1["comments"]
-    pubdate2 = r1["pubDate"]
-    category2 = r1["category"]
-    description2 = r1["description"]
-    enclosure2 = r1["enclosure"]["@attributes"]
-    nzburl2 = enclosure2["url"]
-    length2 = enclosure2["length"]
-    attr_categorylist2 = []
-    attr_size2 = "-"
-    attr_guid2 = "-"
-    attr_grabs2 ="0"
-    attr_files2 = "-"
-    attr_poster2 = "-"
-    attr_group2 = "-"
-    attr_usenetdate2 = "-"
-    attr_comments2 = "-"
-    attr_password2 = "-"
-    for a11 in r1["attr"]:
-        a0 = a11["@attributes"]
-        if a0["name"] == "category":
-            attr_categorylist2.append(a0["value"])
-        if a0["name"] == "size":
-            attr_size2 = a0["value"]
-        if a0["name"] == "guid":
-            attr_guid2 = a0["value"]
-        if a0["name"] == "grabs":
-            attr_grabs2 = a0["value"]
-        if a0["name"] == "files":
-            attr_files2 = a0["value"]
-        if a0["name"] == "poster":
-            attr_poster2 = a0["value"]
-        if a0["name"] == "group":
-            attr_group2 = a0["value"]
-        if a0["name"] == "usenetdate":
-            attr_usenetdate2 = a0["value"]
-        if a0["name"] == "comments":
-            attr_comments2 = a0["value"]
-        if a0["name"] == "password":
-            attr_password2 = a0["value"]
-    print("Title:", title2)
-    print("link:", link2)
-    print("pubdate", pubdate2)
-    print("category", category2)
-    print("description:", description)
-    print("Enclosure nzburl, length:", nzburl2, length2)
-    print("Attr Categories:", attr_categorylist2)
-    print("Attr Size:", attr_size2)
-    print("Attr Guid:", attr_guid2)
-    print("Attr Grabs:", attr_grabs2)
-    print("Attr Files:", attr_files2)
-    print("Attr Poster:", attr_poster2)
-    print("Attr Group:", attr_group2)
-    print("Attr usenetdate:", attr_usenetdate2)
-    print("Attr Comments.", attr_comments2)
-    print("Attr_password:", attr_password2)
-
-    print("")
-    t2 = int((time.time() - time.mktime(email.utils.parsedate(attr_usenetdate2)))/(3600*24))
-
-    print("pub Age", t1)
-    print("Use Age", t2)
-
-    print("-" * 80)'''
-
+    while tgrm.running:
+        time.sleep(1)
+    tgrm.stop()
     return 1
+
+

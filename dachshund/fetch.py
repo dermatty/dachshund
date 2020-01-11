@@ -35,6 +35,8 @@ def fetch_all_indexers(indexerdict, qstr, maindir, writetofile=True):
         qstr0 = qstr[:]
         qstr0_rfc = urllib.parse.quote(qstr0)
         urllist.append((idx, idx_obj.build_all_search_url(qstr0_rfc)))
+    loop = asyncio.new_event_loop()
+    asyncio.set_event_loop(loop)
     full_res = asyncio.get_event_loop().run_until_complete(fetch_all_urls(urllist))
     for idx, url, res in full_res:
         indexerdict[idx].search1_result = res
