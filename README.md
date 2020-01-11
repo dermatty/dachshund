@@ -1,3 +1,3 @@
 # dachshund
-A telegrambot for searching & leeching the usenet
+A telegram bot for searching & leeching the usenet
 
