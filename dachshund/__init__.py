@@ -19,13 +19,30 @@ def truncate_middle(s, n):
     return '{0}...{1}'.format(s[:n_1], s[-n_2:])
 
 
-def nzbget_history(rcodelist):
+def nzbget_getbyid(nzbid, nzbget):
     f = furl()
-    f.host = "etec.iv.at"
+    f.host = nzbget["host"]
     f.scheme = "http"
-    f.port = 6789
-    f.username = "nzbget"
-    f.password = "tegbzn6789"
+    f.port = nzbget["port"]
+    f.username = nzbget["username"]
+    f.password = nzbget["password"]
+    f.path.add("xmlrpc")
+    rpc = xmlrpc.client.ServerProxy(f.tostr())
+    history = rpc.history()
+    fn = ""
+    for h in history:
+        if nzbid == h["NZBID"]:
+            fn = h["DestDir"]
+    return fn
+
+
+def nzbget_history(rcodelist, nzbget):
+    f = furl()
+    f.host = nzbget["host"]
+    f.scheme = "http"
+    f.port = nzbget["port"]
+    f.username = nzbget["username"]
+    f.password = nzbget["password"]
     f.path.add("xmlrpc")
     rpc = xmlrpc.client.ServerProxy(f.tostr())
     history = rpc.history()
@@ -33,21 +50,21 @@ def nzbget_history(rcodelist):
     for h in history:
         nzbid = h["NZBID"]
         matches = [title for title, rcode in rcodelist if nzbid == rcode]
-        found_in_rcode = len(matches) > 0
-        if found_in_rcode:
-            rep += h["Name"] + " / " + h["Status"] + " / " + h["DestDir"] + "\n"
+        found_in_rcodelist = len(matches) > 0
+        if found_in_rcodelist:
+            rep += "[" + str(nzbid) + "] " + h["Name"] + " / " + h["Status"] + " / " + h["DestDir"] + "\n"
     if rep:
         rep = rep[:-2]
     return rep
 
 
-def nzbget_status(maindir):
+def nzbget_status(maindir, nzbget):
     f = furl()
-    f.host = "etec.iv.at"
+    f.host = nzbget["host"]
     f.scheme = "http"
-    f.port = 6789
-    f.username = "nzbget"
-    f.password = "tegbzn6789"
+    f.port = nzbget["port"]
+    f.username = nzbget["username"]
+    f.password = nzbget["password"]
     f.path.add("xmlrpc")
     rpc = xmlrpc.client.ServerProxy(f.tostr())
     status = rpc.status()

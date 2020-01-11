@@ -42,10 +42,10 @@ def fetch_all_indexers(indexerdict, qstr, maindir, writetofile=True):
         indexerdict[idx].search1_result = res
         indexerdict[idx].xmltree = ET.fromstring(res)
         # for dev write xmltree to file
-        if writetofile:
-            filename = maindir + idx + "_" + qstr + ".xml"
-            with open(filename, "wb") as xmlfile:
-                xmlfile.write(res)
+        #if writetofile:
+        #    filename = maindir + idx + "_" + qstr + ".xml"
+        #    with open(filename, "wb") as xmlfile:
+        #        xmlfile.write(res)
 
 
 def fetch_all_guids(nsr, indexerdict):
@@ -73,7 +73,7 @@ def fetch_all_guids(nsr, indexerdict):
             break
 
     for idx, url, res in full_res:
-        print(idx)
+        #print(idx)
         if res:
             nsr.search2_result_raw[idx] = ET.fromstring(res)
         else:

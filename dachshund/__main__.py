@@ -6,12 +6,18 @@ import configparser
 import email.utils
 import time
 from furl import furl
-from dachshund import fetch, nzbget_status, is_same, make_pretty_bytes, truncate_middle, nzbget_history
+from dachshund import fetch, nzbget_status, is_same, make_pretty_bytes, truncate_middle, nzbget_history,\
+    nzbget_getbyid
 import xml.etree.ElementTree as ET
 import xmlrpc.client
 from telegram.ext import Updater, MessageHandler, Filters
 import json
 import asyncio
+import shutil
+
+
+class DHException(Exception):
+    pass
 
 
 class TelegramThread:
@@ -21,7 +27,15 @@ class TelegramThread:
         self.maindir = maindir
         self.running = False
         self.token = self.cfg["TELEGRAM"]["TOKEN"]
+        self.nzbget = {}
+        self.nzbget["host"] = self.cfg["NZBGET"]["HOST"]
+        self.nzbget["port"] = int(self.cfg["NZBGET"]["PORT"])
+        self.nzbget["username"] = self.cfg["NZBGET"]["USERNAME"]
+        self.nzbget["password"] = self.cfg["NZBGET"]["PASSWORD"]
         self.chatids = json.loads(self.cfg.get("TELEGRAM", "CHATIDS"))
+        self.motd = 'd <nr>: details / dl <nr>: download nzb / l: list / s "...": search\n'
+        self.motd += "t: toggle search / e!: exit / st: nzbget status / h history\n"
+        self.motd += "c <nzbid> eltern/kinder <newname>: copy to plex\n"
 
     def start(self):
         try:
@@ -32,9 +46,8 @@ class TelegramThread:
             self.updater.start_polling()
             self.running = True
             self.nsr = None
-            rep = "Welcome to dachshund v1.0 - usenet search & download telegram bot\n"
-            rep += 'd <nr>: details / dl <nr>: download nzb / l: list / s "...": search\n'
-            rep += "t: toggle search / e!: exit / st: nzbget status / h history\n"
+            rep = "Welcome to dachshund v1.0 - usenet search telegram bot\n"
+            rep += self.motd
             self.send_message_all(rep)
             return 1
         except Exception:
@@ -63,8 +76,8 @@ class TelegramThread:
         if msg[:2] == "dl" and self.nsr:
             nzbnr = msg[2:].lstrip().rstrip()
             rep += "downloading " + str(nzbnr) + "\n"
-            rep += self.nsr.download_nzb(nzbnr) + "\n"
-        if msg[:1] == "t" and self.nsr:
+            rep += self.nsr.download_nzb(nzbnr, self.nzbget) + "\n"
+        elif msg[:1] == "t" and self.nsr:
             rep += self.nsr.toggle_sort() + "\n"
         elif msg[:1] == "d" and self.nsr:
             nzbnr = msg[2:].lstrip().rstrip()
@@ -72,7 +85,30 @@ class TelegramThread:
         elif msg[:2] == "e!":
             self.running = False
         elif msg[:2] == "st":
-            rep += nzbget_status(self.maindir)
+            rep += nzbget_status(self.maindir, self.nzbget)
+        elif msg[:1] == "c" and self.nsr:
+            # c <NZBID> eltern/kinder <newname>
+            try:
+                strlist = msg[2:].lstrip().rstrip()
+                strlist = strlist.split(" ")
+                nzbid = int(strlist[0])
+                ek = strlist[1].lstrip().rstrip()
+                if ek not in ["eltern", "kinder"]:
+                    raise DHException("target1 must be 'eltern' or 'kinder'")
+                newname = strlist[2].lstrip().rstrip()
+                src = nzbget_getbyid(nzbid, self.nzbget)
+                # here: rename biggest file!!
+
+                if ek == "eltern":
+                    dst = "/media/cifs/filme/" + ek + "/Filme/Diverse/" + newname
+                else:
+                    dst = "/media/cifs/filme/" + ek + "/Filme/" + newname
+                # print(src, "-->", dst)
+                shutil.copytree(src, dst)
+                rep += "copy ok!\n"
+            except Exception as e:
+                rep += "cannot copy: " + str(e) + "\n"
+
         elif msg[:1] == "s":
             try:
                 qstr = re.findall(r'"([^"]*)"', msg[1:])[0]
@@ -99,15 +135,14 @@ class TelegramThread:
             resstr = self.nsr.print_search_results()
             rep += resstr
         elif msg[:1] == "h" and self.nsr:
-            rep += nzbget_history(self.nsr.rcodelist)
+            rep += nzbget_history(self.nsr.rcodelist, self.nzbget)
         elif not self.nsr:
             rep += "cannot execute as no search results available \n"
         else:
             rep += ("unknown command " + msg[:2] + "\n")
         if msg[:2] != "e!":
             rep += ("-" * 80 + "\n")
-            rep += 'd <nr>: details / dl <nr>: download nzb / l: list / s "...": search\n'
-            rep += "t: toggle search / e!: exit / st: nzbget status / h: history"
+            rep += self.motd
         update.message.reply_text(rep)
 
 
@@ -178,7 +213,7 @@ class NewsSearchResult:
         nzb = self.searchresultlist[nzbnr-1]
         return(nzb["title"])
 
-    def download_nzb(self, nzbnr0):
+    def download_nzb(self, nzbnr0, nzbget):
         try:
             nzbnr = int(nzbnr0)
         except Exception:
@@ -187,11 +222,11 @@ class NewsSearchResult:
             return ""
         nzb = self.searchresultlist[nzbnr-1]
         f = furl()
-        f.host = "etec.iv.at"
+        f.host = nzbget["host"]
         f.scheme = "http"
-        f.port = 6789
-        f.username = "nzbget"
-        f.password = "tegbzn6789"
+        f.port = nzbget["port"]
+        f.username = nzbget["username"]
+        f.password = nzbget["password"]
         f.path.add("xmlrpc")
         try:
             title = nzb["title"]
@@ -202,7 +237,7 @@ class NewsSearchResult:
             self.rcodelist.append((nzb["title"], rcode))
             return nzb["title"]
         except Exception as e:
-            print(e)
+            print(str(e))
             return ""
 
     def print_search_results(self, maxage=0, maxnr=0):
