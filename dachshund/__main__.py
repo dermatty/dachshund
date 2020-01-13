@@ -14,6 +14,12 @@ from telegram.ext import Updater, MessageHandler, Filters
 import json
 import asyncio
 import shutil
+import logging
+import logging.handlers
+import signal
+
+
+__version__ = "1.0"
 
 
 class DHException(Exception):
@@ -21,21 +27,31 @@ class DHException(Exception):
 
 
 class TelegramThread:
-    def __init__(self, cfg_file, maindir):
-        self.cfg_file = cfg_file
-        self.indexerdict, self.cfg = read_config(self.cfg_file)
-        self.maindir = maindir
-        self.running = False
-        self.token = self.cfg["TELEGRAM"]["TOKEN"]
-        self.nzbget = {}
-        self.nzbget["host"] = self.cfg["NZBGET"]["HOST"]
-        self.nzbget["port"] = int(self.cfg["NZBGET"]["PORT"])
-        self.nzbget["username"] = self.cfg["NZBGET"]["USERNAME"]
-        self.nzbget["password"] = self.cfg["NZBGET"]["PASSWORD"]
-        self.chatids = json.loads(self.cfg.get("TELEGRAM", "CHATIDS"))
-        self.motd = 'd <nr>: details / dl <nr>: download nzb / l: list / s "...": search\n'
-        self.motd += "t: toggle search / e!: exit / st: nzbget status / h history\n"
-        self.motd += "c <nzbid> eltern/kinder <newname>: copy to plex\n"
+    def __init__(self, cfg_file, maindir, logger):
+        try:
+            self.logger = logger
+            self.cfg_file = cfg_file
+            self.indexerdict, self.cfg = read_config(self.cfg_file, logger)
+            self.maindir = maindir
+            self.running = False
+            self.token = self.cfg["TELEGRAM"]["TOKEN"]
+            self.furl = furl()
+            self.furl.host = self.cfg["NZBGET"]["HOST"]
+            self.furl.scheme = "http"
+            self.furl.port = int(self.cfg["NZBGET"]["PORT"])
+            self.furl.username = self.cfg["NZBGET"]["USERNAME"]
+            self.furl.password = self.cfg["NZBGET"]["PASSWORD"]
+            self.furl.path.add("xmlrpc")
+
+            self.chatids = json.loads(self.cfg.get("TELEGRAM", "CHATIDS"))
+            self.motd = 'd <nr>: details / dl <nr>: download nzb / l: list / s "...": search\n'
+            self.motd += "t: toggle search / e!: exit / st: nzbget status / h history\n"
+            self.motd += "c <nzbid> eltern/kinder <newname>: copy to plex\n"
+            self.initok = True
+            self.errstr = ""
+        except Exception as e:
+            self.initok = False
+            self.errstr = str(e)
 
     def start(self):
         try:
@@ -50,10 +66,11 @@ class TelegramThread:
             rep += self.motd
             self.send_message_all(rep)
             return 1
-        except Exception:
+        except Exception as e:
             self.token = None
             self.chatids = None
             self.running = False
+            self.errstr = str(e)
             return -1
 
     def stop(self):
@@ -66,17 +83,20 @@ class TelegramThread:
             try:
                 self.bot.send_message(chat_id=c, text=text)
             except Exception as e:
-                print(str(e))
+                self.logger.warning(str(e) + ": error in send_message_all!")
 
     def handler(self, update, context):
         getfromfile = False
         msg0 = update.message.text.lower()
         msg = msg0.lstrip()
         rep = ""
+        if len(msg) < 1:
+            update.message.reply_text("You have to enter a command!")
+            return
         if msg[:2] == "dl" and self.nsr:
             nzbnr = msg[2:].lstrip().rstrip()
             rep += "downloading " + str(nzbnr) + "\n"
-            rep += self.nsr.download_nzb(nzbnr, self.nzbget) + "\n"
+            rep += self.nsr.download_nzb(nzbnr, self.furl) + "\n"
         elif msg[:1] == "t" and self.nsr:
             rep += self.nsr.toggle_sort() + "\n"
         elif msg[:1] == "d" and self.nsr:
@@ -85,7 +105,7 @@ class TelegramThread:
         elif msg[:2] == "e!":
             self.running = False
         elif msg[:2] == "st":
-            rep += nzbget_status(self.maindir, self.nzbget)
+            rep += nzbget_status(self.maindir, self.furl)
         elif msg[:1] == "c" and self.nsr:
             # c <NZBID> eltern/kinder <newname>
             try:
@@ -96,14 +116,15 @@ class TelegramThread:
                 if ek not in ["eltern", "kinder"]:
                     raise DHException("target1 must be 'eltern' or 'kinder'")
                 newname = strlist[2].lstrip().rstrip()
-                src = nzbget_getbyid(nzbid, self.nzbget)
+                src = nzbget_getbyid(nzbid, self.furl, self.logger)
+                if not src:
+                    raise DHException("could not query this NZBID!")
                 # here: rename biggest file!!
 
                 if ek == "eltern":
                     dst = "/media/cifs/filme/" + ek + "/Filme/Diverse/" + newname
                 else:
                     dst = "/media/cifs/filme/" + ek + "/Filme/" + newname
-                # print(src, "-->", dst)
                 shutil.copytree(src, dst)
                 rep += "copy ok!\n"
             except Exception as e:
@@ -116,7 +137,7 @@ class TelegramThread:
                     try:
                         fetch.fetch_all_indexers(self.indexerdict, qstr, self.maindir, writetofile=True)
                     except Exception as e:
-                        print(str(e))
+                        self.logger.error(str(e) + ": error in usenet search / indexer fetch!")
                 else:
                     for idx_name, idx_obj in self.indexerdict.items():
                         filename = self.maindir + idx_name + "_" + qstr + ".xml"
@@ -126,16 +147,16 @@ class TelegramThread:
                 for idx_name, idx_obj in self.indexerdict.items():
                     idx_obj.analyze_search1()
                     searchresult1.extend(idx_obj.search1_list)
-                self.nsr = NewsSearchResult(searchresult1, self.maindir)
+                self.nsr = NewsSearchResult(searchresult1, self.maindir, self.logger)
                 resstr = self.nsr.print_search_results()
                 rep += resstr
-            except Exception:
-                pass
+            except Exception as e:
+                self.logger.error(str(e) + ": error in usenet search / etc. !")
         elif msg[:1] == "l" and self.nsr:
             resstr = self.nsr.print_search_results()
             rep += resstr
         elif msg[:1] == "h" and self.nsr:
-            rep += nzbget_history(self.nsr.rcodelist, self.nzbget)
+            rep += nzbget_history(self.nsr.rcodelist, self.furl)
         elif not self.nsr:
             rep += "cannot execute as no search results available \n"
         else:
@@ -147,7 +168,8 @@ class TelegramThread:
 
 
 class NewsSearchResult:
-    def __init__(self, searchresultlist, maindir):
+    def __init__(self, searchresultlist, maindir, logger):
+        self.logger = logger
         self.searchresultlist = searchresultlist
         self.maindir = maindir
         self.search2_result_raw = {}
@@ -201,7 +223,7 @@ class NewsSearchResult:
         try:
             self.sort_search_results()
         except Exception as e:
-            print(str(e))
+            self.logger.error(str(e) + ": error in check_for_sameness_clearup")
 
     def nzb_details(self, nzbnr0):
         try:
@@ -213,21 +235,16 @@ class NewsSearchResult:
         nzb = self.searchresultlist[nzbnr-1]
         return(nzb["title"])
 
-    def download_nzb(self, nzbnr0, nzbget):
+    def download_nzb(self, nzbnr0, furl):
         try:
             nzbnr = int(nzbnr0)
-        except Exception:
+        except Exception as e:
+            self.logger.error(str(e) + ": error in getting NZBID!")
             return ""
         if nzbnr < 1 or nzbnr > len(self.searchresultlist):
             return ""
         nzb = self.searchresultlist[nzbnr-1]
-        f = furl()
-        f.host = nzbget["host"]
-        f.scheme = "http"
-        f.port = nzbget["port"]
-        f.username = nzbget["username"]
-        f.password = nzbget["password"]
-        f.path.add("xmlrpc")
+        f = furl
         try:
             title = nzb["title"]
             rpc = xmlrpc.client.ServerProxy(f.tostr())
@@ -235,9 +252,10 @@ class NewsSearchResult:
                 title += ".nzb"
             rcode = rpc.append(title, nzb["url"], "", 0, False, False, "", 0, "SCORE", [])
             self.rcodelist.append((nzb["title"], rcode))
+            self.logger.info("Downloading " + nzb["title"])
             return nzb["title"]
         except Exception as e:
-            print(str(e))
+            self.logger.error(str(e) + ": error in downloading NZB!")
             return ""
 
     def print_search_results(self, maxage=0, maxnr=0):
@@ -348,12 +366,12 @@ class Indexer:
                 self.search1_list.append(itemdict)
 
 
-def read_config(cfg_file):
+def read_config(cfg_file, logger):
     try:
         cfg = configparser.ConfigParser()
         cfg.read(cfg_file)
     except Exception as e:
-        print(str(e))
+        logger.error(str(e) + ": error in read_config!")
         return None, None
     idx = 1
     indexerdict = {}
@@ -371,19 +389,48 @@ def read_config(cfg_file):
     return indexerdict, cfg
 
 
+class SigHandler:
+    def __init__(self, logger, tgram):
+        self.logger = logger
+        self.tgram = tgram
+
+    def sighandler(self, a, b):
+        self.logger.info("Received SIGINT/SIGTERM, terminating ...")
+        self.tgram.running = False
+
+
 def run():
     # install_dir = os.path.dirname(os.path.realpath(__file__))
     userhome = expanduser("~")
     maindir = userhome + "/.dachshund/"
 
+    # Init Logger
+    logger = logging.getLogger("dh")
+    logger.setLevel(logging.INFO)
+    fh = logging.FileHandler(maindir + "dachshund.log", mode="w")
+    formatter = logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s')
+    fh.setFormatter(formatter)
+    logger.addHandler(fh)
+    logger.info("Dachshund " + __version__ + " started!")
+
     cfg_file = maindir + "dachshund.config"
 
-    tgrm = TelegramThread(cfg_file, maindir)
+    tgrm = TelegramThread(cfg_file, maindir, logger)
+    if not tgrm.initok:
+        logger.error(tgrm.errstr + " :cannot set up telegram bot thread, exiting ...")
+        return -1
     tgrm.start()
+    if not tgrm.running:
+        logger.error(tgrm.errstr + ": cannot start telegram bot thread, exiting ...")
+        return -1
+
+    sh = SigHandler(logger, tgrm)
+    signal.signal(signal.SIGINT, sh.sighandler)
+    signal.signal(signal.SIGTERM, sh.sighandler)
 
     while tgrm.running:
         time.sleep(1)
     tgrm.stop()
+
+    logger.info("Telegram bot stopped, exiting Dachshund ...")
     return 1
-
-

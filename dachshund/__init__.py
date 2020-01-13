@@ -19,53 +19,45 @@ def truncate_middle(s, n):
     return '{0}...{1}'.format(s[:n_1], s[-n_2:])
 
 
-def nzbget_getbyid(nzbid, nzbget):
-    f = furl()
-    f.host = nzbget["host"]
-    f.scheme = "http"
-    f.port = nzbget["port"]
-    f.username = nzbget["username"]
-    f.password = nzbget["password"]
-    f.path.add("xmlrpc")
-    rpc = xmlrpc.client.ServerProxy(f.tostr())
-    history = rpc.history()
-    fn = ""
-    for h in history:
-        if nzbid == h["NZBID"]:
-            fn = h["DestDir"]
-    return fn
+def nzbget_getbyid(nzbid, furl0, logger):
+    try:
+        f = furl0
+        rpc = xmlrpc.client.ServerProxy(f.tostr())
+        history = rpc.history()
+        fn = ""
+        for h in history:
+            if nzbid == h["NZBID"]:
+                fn = h["DestDir"]
+        return fn
+    except Exception as e:
+        logger.error(str(e) + ": error in nzbget_getbyid")
+        return None
 
 
-def nzbget_history(rcodelist, nzbget):
-    f = furl()
-    f.host = nzbget["host"]
-    f.scheme = "http"
-    f.port = nzbget["port"]
-    f.username = nzbget["username"]
-    f.password = nzbget["password"]
-    f.path.add("xmlrpc")
-    rpc = xmlrpc.client.ServerProxy(f.tostr())
-    history = rpc.history()
-    rep = ""
-    for h in history:
-        nzbid = h["NZBID"]
-        matches = [title for title, rcode in rcodelist if nzbid == rcode]
-        found_in_rcodelist = len(matches) > 0
-        if found_in_rcodelist:
-            rep += "[" + str(nzbid) + "] " + h["Name"] + " / " + h["Status"] + " / " + h["DestDir"] + "\n"
-    if rep:
-        rep = rep[:-2]
-    return rep
+def nzbget_history(rcodelist, furl0, logger):
+    f = furl0
+    try:
+        rpc = xmlrpc.client.ServerProxy(f.tostr())
+        history = rpc.history()
+        rep = ""
+        for h in history:
+            nzbid = h["NZBID"]
+            matches = [title for title, rcode in rcodelist if nzbid == rcode]
+            found_in_rcodelist = len(matches) > 0
+            if found_in_rcodelist:
+                rep += "[" + str(nzbid) + "] " + h["Name"] + " / " + h["Status"] + " / " + h["DestDir"] + "\n"
+        if rep:
+            rep = rep[:-2]
+        else:
+            rep = "Do not know this NZBID!"
+        return rep
+    except Exception as e:
+        logger.error(str(e) + ": error in nzbget_history")
+        return None
 
 
-def nzbget_status(maindir, nzbget):
-    f = furl()
-    f.host = nzbget["host"]
-    f.scheme = "http"
-    f.port = nzbget["port"]
-    f.username = nzbget["username"]
-    f.password = nzbget["password"]
-    f.path.add("xmlrpc")
+def nzbget_status(maindir, furl0):
+    f = furl0
     rpc = xmlrpc.client.ServerProxy(f.tostr())
     status = rpc.status()
     groups = rpc.listgroups(0)
@@ -81,7 +73,7 @@ def nzbget_status(maindir, nzbget):
         size = str(g["FileSizeMB"]) + "M"
         rem = str(g["RemainingSizeMB"] - g["PausedSizeMB"]) + "M"
         nr = truncate_middle("[" + str(i+1) + "]", 5)
-        res += nr + truncate_middle(g["NZBFilename"], 40) + " (" + g["Status"] + ") / " + rem + " of "  + size + "\n"
+        res += nr + truncate_middle(g["NZBFilename"], 40) + " (" + g["Status"] + ") / " + rem + " of " + size + "\n"
     return res
 
 
