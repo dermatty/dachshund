@@ -105,7 +105,7 @@ class TelegramThread:
         elif msg[:2] == "e!":
             self.running = False
         elif msg[:2] == "st":
-            rep += nzbget_status(self.maindir, self.furl)
+            rep += nzbget_status(self.maindir, self.furl, self.logger)
         elif msg[:1] == "c" and self.nsr:
             # c <NZBID> eltern/kinder <newname>
             try:
@@ -125,8 +125,9 @@ class TelegramThread:
                     dst = "/media/cifs/filme/" + ek + "/Filme/Diverse/" + newname
                 else:
                     dst = "/media/cifs/filme/" + ek + "/Filme/" + newname
+                self.logger.info("Copying " + src + " to " + dst + " ...")
                 shutil.copytree(src, dst)
-                rep += "copy ok!\n"
+                self.logger.info("Copy done!")
             except Exception as e:
                 rep += "cannot copy: " + str(e) + "\n"
 
@@ -156,7 +157,7 @@ class TelegramThread:
             resstr = self.nsr.print_search_results()
             rep += resstr
         elif msg[:1] == "h" and self.nsr:
-            rep += nzbget_history(self.nsr.rcodelist, self.furl)
+            rep += nzbget_history(self.nsr.rcodelist, self.furl, self.logger)
         elif not self.nsr:
             rep += "cannot execute as no search results available \n"
         else:

@@ -31,7 +31,7 @@ def nzbget_getbyid(nzbid, furl0, logger):
         return fn
     except Exception as e:
         logger.error(str(e) + ": error in nzbget_getbyid")
-        return None
+        return "Cannot get by NZBID from NZBGet!"
 
 
 def nzbget_history(rcodelist, furl0, logger):
@@ -53,28 +53,32 @@ def nzbget_history(rcodelist, furl0, logger):
         return rep
     except Exception as e:
         logger.error(str(e) + ": error in nzbget_history")
-        return None
+        return "Cannot get history from NZBGet!"
 
 
-def nzbget_status(maindir, furl0):
+def nzbget_status(maindir, furl0, logger):
     f = furl0
-    rpc = xmlrpc.client.ServerProxy(f.tostr())
-    status = rpc.status()
-    groups = rpc.listgroups(0)
-    with open(maindir + "nzbget.status", "w") as sf:
-        sf.write(str(status))
-    with open(maindir + "nzbget.groups", "w") as gf:
-        gf.write(str(groups))
-    res = ""
-    res += "Overall remaining: " + str(make_pretty_bytes(status["RemainingSizeLo"])) + "\n"
-    dlr = "%.1f" % ((status["DownloadRate"] / (1024 * 1024)) * 8) + " MBit"
-    res += "Download rate:     " + dlr + "\n"
-    for i, g in enumerate(groups):
-        size = str(g["FileSizeMB"]) + "M"
-        rem = str(g["RemainingSizeMB"] - g["PausedSizeMB"]) + "M"
-        nr = truncate_middle("[" + str(i+1) + "]", 5)
-        res += nr + truncate_middle(g["NZBFilename"], 40) + " (" + g["Status"] + ") / " + rem + " of " + size + "\n"
-    return res
+    try:
+        rpc = xmlrpc.client.ServerProxy(f.tostr())
+        status = rpc.status()
+        groups = rpc.listgroups(0)
+        with open(maindir + "nzbget.status", "w") as sf:
+            sf.write(str(status))
+        with open(maindir + "nzbget.groups", "w") as gf:
+            gf.write(str(groups))
+        res = ""
+        res += "Overall remaining: " + str(make_pretty_bytes(status["RemainingSizeLo"])) + "\n"
+        dlr = "%.1f" % ((status["DownloadRate"] / (1024 * 1024)) * 8) + " MBit"
+        res += "Download rate:     " + dlr + "\n"
+        for i, g in enumerate(groups):
+            size = str(g["FileSizeMB"]) + "M"
+            rem = str(g["RemainingSizeMB"] - g["PausedSizeMB"]) + "M"
+            nr = truncate_middle("[" + str(i+1) + "]", 5)
+            res += nr + truncate_middle(g["NZBFilename"], 40) + " (" + g["Status"] + ") / " + rem + " of " + size + "\n"
+        return res
+    except Exception as e:
+        logger.error(str(e) + ": error in nzbget_status")
+        return "Cannot get status from NZBGet!"
 
 
 def is_same(item1, item2):
