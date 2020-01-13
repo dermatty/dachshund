@@ -49,7 +49,7 @@ def nzbget_history(rcodelist, furl0, logger):
         if rep:
             rep = rep[:-2]
         else:
-            rep = "Do not know this NZBID!"
+            rep = "No history yet!"
         return rep
     except Exception as e:
         logger.error(str(e) + ": error in nzbget_history")

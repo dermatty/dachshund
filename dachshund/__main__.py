@@ -128,6 +128,7 @@ class TelegramThread:
                 self.logger.info("Copying " + src + " to " + dst + " ...")
                 shutil.copytree(src, dst)
                 self.logger.info("Copy done!")
+                rep += "copy done!\n"
             except Exception as e:
                 rep += "cannot copy: " + str(e) + "\n"
 
