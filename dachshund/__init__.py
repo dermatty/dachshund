@@ -62,6 +62,7 @@ def nzbget_status(maindir, furl0, logger):
         rpc = xmlrpc.client.ServerProxy(f.tostr())
         status = rpc.status()
         groups = rpc.listgroups(0)
+        servervolumes = rpc.servervolumes()
         with open(maindir + "nzbget.status", "w") as sf:
             sf.write(str(status))
         with open(maindir + "nzbget.groups", "w") as gf:
@@ -75,6 +76,14 @@ def nzbget_status(maindir, furl0, logger):
             rem = str(g["RemainingSizeMB"] - g["PausedSizeMB"]) + "M"
             nr = truncate_middle("[" + str(i+1) + "]", 5)
             res += nr + truncate_middle(g["NZBFilename"], 40) + " (" + g["Status"] + ") / " + rem + " of " + size + "\n"
+        #for sv in servervolumes:
+        #    svid = sv["ServerID"]
+        #    bps = sv["BytesPerSeconds"]
+        #    bpslist = [int((bp0["SizeLo"]/(1024*1024))*8) for bp0 in bps]
+        #    logger.info(str(svid))
+        #    logger.info(str(bpslist))
+        #    logger.info("-----------------")
+        #    #res += str(svid) + ": " + str(mbitsec) + " Mbit; "
         return res
     except Exception as e:
         logger.error(str(e) + ": error in nzbget_status")

@@ -147,8 +147,11 @@ class TelegramThread:
                 # merge into ONE search result list (of dict)
                 searchresult1 = []
                 for idx_name, idx_obj in self.indexerdict.items():
-                    idx_obj.analyze_search1()
-                    searchresult1.extend(idx_obj.search1_list)
+                    try:
+                        idx_obj.analyze_search1()
+                        searchresult1.extend(idx_obj.search1_list)
+                    except Exception:
+                        pass
                 self.nsr = NewsSearchResult(searchresult1, self.maindir, self.logger)
                 resstr = self.nsr.print_search_results()
                 rep += resstr
