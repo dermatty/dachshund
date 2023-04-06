@@ -17,7 +17,7 @@ import shutil
 import logging
 import logging.handlers
 
-__version__ = "1.0"
+__version__ = "1.1"
 global tgbd
 global TERMINATED
 
@@ -390,7 +390,7 @@ async def runbot():
     global tgbd
     async with Bot(tgbd.token) as bot:
         try:
-            rep = "Welcome to dachshund v1.0 - usenet search telegram bot\n"
+            rep = "Welcome to dachshund V" + str(__version__) + " - usenet search telegram bot\n"
             rep += tgbd.motd
             for c in tgbd.chatids:
                 await bot.send_message(chat_id=c, text=rep)

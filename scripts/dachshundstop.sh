@@ -1,2 +1,2 @@
 #!/bin/bash
-pkill --signal SIGTERM -f dachshund
+pkill --signal SIGINT -f dachshund
