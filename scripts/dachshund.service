@@ -1,0 +1,14 @@
+[Unit]
+Description=Dachshund 
+After=network.target media-nfs-development.mount mongodb.service redis.service
+
+[Service]
+#Type=forking
+User=stephan
+ExecStart=/home/stephan/.dachshund/dachshundstart.sh
+ExecStop=/home/stephan/.dachshund/dachshundstop.sh
+KillMode=process
+
+[Install]
+WantedBy=multi-user.target
+

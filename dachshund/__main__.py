@@ -1,6 +1,5 @@
 #!/home/stephan/.virtualenvs/dh/bin/python
 from os.path import expanduser
-import os
 import re
 import configparser
 import email.utils
@@ -10,23 +9,24 @@ from dachshund import fetch, nzbget_status, is_same, make_pretty_bytes, truncate
     nzbget_getbyid
 import xml.etree.ElementTree as ET
 import xmlrpc.client
-from telegram.ext import Updater, MessageHandler, Filters
+from telegram import Bot
+import telegram.error
 import json
 import asyncio
 import shutil
 import logging
 import logging.handlers
-import signal
-
 
 __version__ = "1.0"
+global tgbd
+global TERMINATED
 
 
 class DHException(Exception):
     pass
 
 
-class TelegramThread:
+class TelegramBotData:
     def __init__(self, cfg_file, maindir, logger):
         try:
             self.logger = logger
@@ -42,134 +42,16 @@ class TelegramThread:
             self.furl.username = self.cfg["NZBGET"]["USERNAME"]
             self.furl.password = self.cfg["NZBGET"]["PASSWORD"]
             self.furl.path.add("xmlrpc")
-
             self.chatids = json.loads(self.cfg.get("TELEGRAM", "CHATIDS"))
             self.motd = 'd <nr>: details / dl <nr>: download nzb / l: list / s "...": search\n'
             self.motd += "t: toggle search / e!: exit / st: nzbget status / h history\n"
             self.motd += "c <nzbid> eltern/kinder <newname>: copy to plex\n"
             self.initok = True
+            self.nsr = None
             self.errstr = ""
         except Exception as e:
             self.initok = False
             self.errstr = str(e)
-
-    def start(self):
-        try:
-            self.updater = Updater(self.token, use_context=True)
-            self.dp = self.updater.dispatcher
-            self.bot = self.updater.bot
-            self.dp.add_handler(MessageHandler(Filters.text, self.handler))
-            self.updater.start_polling()
-            self.running = True
-            self.nsr = None
-            rep = "Welcome to dachshund v1.0 - usenet search telegram bot\n"
-            rep += self.motd
-            self.send_message_all(rep)
-            return 1
-        except Exception as e:
-            self.token = None
-            self.chatids = None
-            self.running = False
-            self.errstr = str(e)
-            return -1
-
-    def stop(self):
-        self.send_message_all("Stopping dachshund telegram bot, this may take a while ...")
-        self.updater.stop()
-        self.running = False
-
-    def send_message_all(self, text):
-        for c in self.chatids:
-            try:
-                self.bot.send_message(chat_id=c, text=text)
-            except Exception as e:
-                self.logger.warning(str(e) + ": error in send_message_all!")
-
-    def handler(self, update, context):
-        getfromfile = False
-        msg0 = update.message.text.lower()
-        msg = msg0.lstrip()
-        rep = ""
-        if len(msg) < 1:
-            update.message.reply_text("You have to enter a command!")
-            return
-        if msg[:2] == "dl" and self.nsr:
-            nzbnr = msg[2:].lstrip().rstrip()
-            rep += "downloading " + str(nzbnr) + "\n"
-            rep += self.nsr.download_nzb(nzbnr, self.furl) + "\n"
-        elif msg[:1] == "t" and self.nsr:
-            rep += self.nsr.toggle_sort() + "\n"
-        elif msg[:1] == "d" and self.nsr:
-            nzbnr = msg[2:].lstrip().rstrip()
-            rep += self.nsr.nzb_details(nzbnr) + "\n"
-        elif msg[:2] == "e!":
-            self.running = False
-        elif msg[:2] == "st":
-            rep += nzbget_status(self.maindir, self.furl, self.logger)
-        elif msg[:1] == "c" and self.nsr:
-            # c <NZBID> eltern/kinder <newname>
-            try:
-                strlist = msg[2:].lstrip().rstrip()
-                strlist = strlist.split(" ")
-                nzbid = int(strlist[0])
-                ek = strlist[1].lstrip().rstrip()
-                if ek not in ["eltern", "kinder"]:
-                    raise DHException("target1 must be 'eltern' or 'kinder'")
-                newname = strlist[2].lstrip().rstrip()
-                src = nzbget_getbyid(nzbid, self.furl, self.logger)
-                if not src:
-                    raise DHException("could not query this NZBID!")
-                # here: rename biggest file!!
-
-                if ek == "eltern":
-                    dst = "/media/cifs/filme/" + ek + "/Filme/Diverse/" + newname
-                else:
-                    dst = "/media/cifs/filme/" + ek + "/Filme/" + newname
-                self.logger.info("Copying " + src + " to " + dst + " ...")
-                shutil.copytree(src, dst)
-                self.logger.info("Copy done!")
-                rep += "copy done!\n"
-            except Exception as e:
-                rep += "cannot copy: " + str(e) + "\n"
-
-        elif msg[:1] == "s":
-            try:
-                qstr = re.findall(r'"([^"]*)"', msg[1:])[0]
-                if not getfromfile:
-                    try:
-                        fetch.fetch_all_indexers(self.indexerdict, qstr, self.maindir, writetofile=True)
-                    except Exception as e:
-                        self.logger.error(str(e) + ": error in usenet search / indexer fetch!")
-                else:
-                    for idx_name, idx_obj in self.indexerdict.items():
-                        filename = self.maindir + idx_name + "_" + qstr + ".xml"
-                        idx_obj.get_xmltree_from_file(filename)
-                # merge into ONE search result list (of dict)
-                searchresult1 = []
-                for idx_name, idx_obj in self.indexerdict.items():
-                    try:
-                        idx_obj.analyze_search1()
-                        searchresult1.extend(idx_obj.search1_list)
-                    except Exception:
-                        pass
-                self.nsr = NewsSearchResult(searchresult1, self.maindir, self.logger)
-                resstr = self.nsr.print_search_results()
-                rep += resstr
-            except Exception as e:
-                self.logger.error(str(e) + ": error in usenet search / etc. !")
-        elif msg[:1] == "l" and self.nsr:
-            resstr = self.nsr.print_search_results()
-            rep += resstr
-        elif msg[:1] == "h" and self.nsr:
-            rep += nzbget_history(self.nsr.rcodelist, self.furl, self.logger)
-        elif not self.nsr:
-            rep += "cannot execute as no search results available \n"
-        else:
-            rep += ("unknown command " + msg[:2] + "\n")
-        if msg[:2] != "e!":
-            rep += ("-" * 80 + "\n")
-            rep += self.motd
-        update.message.reply_text(rep)
 
 
 class NewsSearchResult:
@@ -238,7 +120,7 @@ class NewsSearchResult:
         if nzbnr < 1 or nzbnr > len(self.searchresultlist):
             return -1
         nzb = self.searchresultlist[nzbnr-1]
-        return(nzb["title"])
+        return (nzb["title"])
 
     def download_nzb(self, nzbnr0, furl):
         try:
@@ -288,10 +170,10 @@ class NewsSearchResult:
         res = ell_nr + ell_idx + " " + ell_title + " / " + ell_age + " / " + ell_size
         for i, s in enumerate(self.searchresultlist):
             nr = i + 1
-            if maxnr > 0 and maxnr < nr:
+            if 0 < maxnr < nr:
                 res = res[:-2]
                 break
-            if maxage > 0 and maxage < s["age"]:
+            if 0 < maxage < s["age"]:
                 continue
             res += "\n"
             ell_nr = truncate_middle("[" + str(nr) + "]", 5)
@@ -404,10 +286,149 @@ class SigHandler:
         self.tgram.running = False
 
 
+def dhandler(msg0):
+    global tgbd
+    getfromfile = False
+    msg = msg0.lstrip()
+    rep = ""
+    if len(msg) < 1:
+        rep = "You have to enter a command!"
+        return rep
+    if msg[:2] == "dl" and tgbd.nsr:
+        nzbnr = msg[2:].lstrip().rstrip()
+        rep += "downloading " + str(nzbnr) + "\n"
+        rep += tgbd.nsr.download_nzb(nzbnr, tgbd.furl) + "\n"
+    elif msg[:1] == "t" and tgbd.nsr:
+        rep += tgbd.nsr.toggle_sort() + "\n"
+    elif msg[:1] == "d" and tgbd.nsr:
+        nzbnr = msg[2:].lstrip().rstrip()
+        rep += tgbd.nsr.nzb_details(nzbnr) + "\n"
+    elif msg[:2] == "e!":
+        tgbd.running = False
+    elif msg[:2] == "st":
+        rep += nzbget_status(tgbd.maindir, tgbd.furl, tgbd.logger)
+    elif msg[:1] == "c" and tgbd.nsr:
+        # c <NZBID> eltern/kinder <newname>
+        try:
+            strlist = msg[2:].lstrip().rstrip()
+            strlist = strlist.split(" ")
+            nzbid = int(strlist[0])
+            ek = strlist[1].lstrip().rstrip()
+            if ek not in ["eltern", "kinder"]:
+                raise DHException("target1 must be 'eltern' or 'kinder'")
+            newname = strlist[2].lstrip().rstrip()
+            src = nzbget_getbyid(nzbid, tgbd.furl, tgbd.logger)
+            if not src:
+                raise DHException("could not query this NZBID!")
+            # here: rename biggest file!!
+
+            if ek == "eltern":
+                dst = "/media/cifs/filme/" + ek + "/Filme/Diverse/" + newname
+            else:
+                dst = "/media/cifs/filme/" + ek + "/Filme/" + newname
+            tgbd.logger.info("Copying " + src + " to " + dst + " ...")
+            shutil.copytree(src, dst)
+            tgbd.logger.info("Copy done!")
+            rep += "copy done!\n"
+        except Exception as e:
+            rep += "cannot copy: " + str(e) + "\n"
+    elif msg[:1] == "s":
+        try:
+            qstr = re.findall(r'"([^"]*)"', msg[1:])[0]
+            if not getfromfile:
+                try:
+                    fetch.tfetch_all_indexers(tgbd.indexerdict, qstr, tgbd.maindir, writetofile=True)
+                except Exception as e:
+                    tgbd.logger.error(str(e) + ": error in usenet search / indexer fetch!")
+            else:
+                for idx_name, idx_obj in tgbd.indexerdict.items():
+                    filename = tgbd.maindir + idx_name + "_" + qstr + ".xml"
+                    idx_obj.get_xmltree_from_file(filename)
+            # merge into ONE search result list (of dict)
+            searchresult1 = []
+            #print(tgbd.indexerdict.items())
+            for idx_name, idx_obj in tgbd.indexerdict.items():
+                try:
+                    idx_obj.analyze_search1()
+                    searchresult1.extend(idx_obj.search1_list)
+                except Exception:
+                    pass
+            tgbd.nsr = NewsSearchResult(searchresult1, tgbd.maindir, tgbd.logger)
+            resstr = tgbd.nsr.print_search_results()
+            rep += resstr
+        except Exception as e:
+            tgbd.logger.error(str(e) + ": error in usenet search / etc. !")
+    elif msg[:1] == "l" and tgbd.nsr:
+        resstr = tgbd.nsr.print_search_results()
+        rep += resstr
+    elif msg[:1] == "h" and tgbd.nsr:
+        rep += nzbget_history(tgbd.nsr.rcodelist, tgbd.furl, tgbd.logger)
+    elif not tgbd.nsr:
+        rep += "cannot execute as no search results available \n"
+    else:
+        rep += ("unknown command " + msg[:2] + "\n")
+    if msg[:2] != "e!":
+        rep += ("-" * 80 + "\n")
+        rep += tgbd.motd
+    return rep
+
+
+async def dhecho(bot, update_id):
+    updates = await bot.get_updates(offset=update_id, timeout=10)
+    txt0 = ""
+    for update in updates:
+        next_update_id = update.update_id + 1
+        if update.message and update.message.text:
+            txt0 = update.message.text
+            rep = dhandler(txt0)
+            await update.message.reply_text(rep)     # update.message.text)
+        return next_update_id, txt0
+    return update_id, ""
+
+
+async def runbot():
+    global tgbd
+    async with Bot(tgbd.token) as bot:
+        try:
+            rep = "Welcome to dachshund v1.0 - usenet search telegram bot\n"
+            rep += tgbd.motd
+            for c in tgbd.chatids:
+                await bot.send_message(chat_id=c, text=rep)
+            try:
+                update_id = (await bot.get_updates())[0].update_id + 1
+            except IndexError:
+                update_id = None
+
+            tgbd.running = True
+            while tgbd.running:
+                try:
+                    update_id, txt0 = await dhecho(bot, update_id)
+                except telegram.error.NetworkError:
+                    await asyncio.sleep(1)
+                except telegram.error.Forbidden:
+                    # The user has removed or blocked the bot.
+                    update_id += 1
+                except Exception as e:
+                    print(str(e))
+                    break
+            rep = "Shutting down Dachshund by >e!< command "
+            for c in tgbd.chatids:
+                await bot.send_message(chat_id=c, text=rep)
+                await asyncio.sleep(1)
+        except asyncio.CancelledError:
+            rep = "Shutting down Dachshund by SIGTERM/systemctl stop"
+            for c in tgbd.chatids:
+                await bot.send_message(chat_id=c, text=rep)
+                await asyncio.sleep(1)
+        except Exception as e:
+            tgbd.logger.error(str(e) + " :error in running runbot, exiting ...")
+
+
 def run():
     # install_dir = os.path.dirname(os.path.realpath(__file__))
     userhome = expanduser("~")
     maindir = userhome + "/.dachshund/"
+    global tgbd
 
     # Init Logger
     logger = logging.getLogger("dh")
@@ -418,24 +439,19 @@ def run():
     logger.addHandler(fh)
     logger.info("Dachshund " + __version__ + " started!")
 
-    cfg_file = maindir + "dachshund.config"
-
-    tgrm = TelegramThread(cfg_file, maindir, logger)
-    if not tgrm.initok:
-        logger.error(tgrm.errstr + " :cannot set up telegram bot thread, exiting ...")
+    try:
+        cfg_file = maindir + "dachshund.config"
+        tgbd = TelegramBotData(cfg_file, maindir, logger)
+        if not tgbd.initok:
+            logger.error(tgbd.errstr + " :cannot set up telegram bot thread, exiting ...")
+            print(tgbd.errstr + " :cannot set up telegram bot thread, exiting ...")
+            return -1
+        asyncio.run(runbot())
+        logger.info("Telegram bot stopped, probably control command")
+    except Exception as e:
+        logger.error(str(e) + " :cannot set up telegram bot thread, exiting ...")
+        print(str(e))
         return -1
-    tgrm.start()
-    if not tgrm.running:
-        logger.error(tgrm.errstr + ": cannot start telegram bot thread, exiting ...")
-        return -1
-
-    sh = SigHandler(logger, tgrm)
-    signal.signal(signal.SIGINT, sh.sighandler)
-    signal.signal(signal.SIGTERM, sh.sighandler)
-
-    while tgrm.running:
-        time.sleep(1)
-    tgrm.stop()
-
     logger.info("Telegram bot stopped, exiting Dachshund ...")
     return 1
+
