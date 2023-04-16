@@ -1,6 +1,7 @@
 #!/home/stephan/.virtualenvs/dh/bin/python
 from os.path import expanduser
 import re
+import signal
 import configparser
 import email.utils
 import time
@@ -9,17 +10,25 @@ from dachshund import fetch, nzbget_status, is_same, make_pretty_bytes, truncate
     nzbget_getbyid
 import xml.etree.ElementTree as ET
 import xmlrpc.client
-from telegram import Bot
-import telegram.error
 import json
-import asyncio
 import shutil
 import logging
 import logging.handlers
+import fridagram as fg
+from threading import Thread
 
-__version__ = "1.1"
-global tgbd
-global TERMINATED
+__version__ = "1.2"
+
+
+class SigHandler:
+
+    def __init__(self, logger, tgb):
+        self.logger = logger
+        self.tgb = tgb
+
+    def sighandler(self, a, b):
+        self.logger.info("Received SIGINT/SIGTERM, terminating ...")
+        self.tgb.running = False
 
 
 class DHException(Exception):
@@ -27,6 +36,7 @@ class DHException(Exception):
 
 
 class TelegramBotData:
+
     def __init__(self, cfg_file, maindir, logger):
         try:
             self.logger = logger
@@ -54,7 +64,152 @@ class TelegramBotData:
             self.errstr = str(e)
 
 
+class TelegramBot(Thread):
+
+    def __init__(self, cfg_file, maindir, logger):
+        Thread.__init__(self)
+        try:
+            self.logger = logger
+            self.cfg_file = cfg_file
+            self.indexerdict, self.cfg = read_config(self.cfg_file, logger)
+            self.maindir = maindir
+            self.running = False
+            self.token = self.cfg["TELEGRAM"]["TOKEN"]
+            self.furl = furl()
+            self.furl.host = self.cfg["NZBGET"]["HOST"]
+            self.furl.scheme = "http"
+            self.furl.port = int(self.cfg["NZBGET"]["PORT"])
+            self.furl.username = self.cfg["NZBGET"]["USERNAME"]
+            self.furl.password = self.cfg["NZBGET"]["PASSWORD"]
+            self.furl.path.add("xmlrpc")
+            self.chatids = json.loads(self.cfg.get("TELEGRAM", "CHATIDS"))
+            self.motd = 'd <nr>: details / dl <nr>: download nzb / l: list / s "...": search\n'
+            self.motd += "t: toggle search / e!: exit / st: nzbget status / h history\n"
+            self.motd += "c <nzbid> eltern/kinder <newname>: copy to plex\n"
+            self.initok = True
+            self.nsr = None
+            self.errstr = ""
+            self.running = False
+        except Exception as e:
+            self.initok = False
+            self.errstr = str(e)
+
+    def run(self):
+        rep = "Welcome to dachshund V" + str(
+            __version__) + " - usenet search telegram bot\n"
+        rep += self.motd
+        for c in self.chatids:
+            fg.send_message(self.token, self.chatids, rep)
+
+        self.running = True
+        while self.running:
+            ok, rlist = fg.receive_message(self.token)
+            if ok and rlist:
+                for chat_id, text in rlist:
+                    if text == "/exit":
+                        self.running = False
+                    else:
+                        rep = self.dhandler(text)
+                        fg.send_message(self.token, [chat_id], rep)
+            if self.running:
+                time.sleep(0.1)
+        rep = "Shutting down Dachshund..."
+        for c in self.chatids:
+            fg.send_message(self.token, self.chatids, rep)
+
+    def dhandler(self, msg0):
+        getfromfile = False
+        msg = msg0.lstrip()
+        rep = ""
+        if len(msg) < 1:
+            rep = "You have to enter a command!"
+            return rep
+        if msg[:2] == "dl" and self.nsr:
+            nzbnr = msg[2:].lstrip().rstrip()
+            rep += "downloading " + str(nzbnr) + "\n"
+            rep += self.nsr.download_nzb(nzbnr, self.furl) + "\n"
+        elif msg[:1] == "t" and self.nsr:
+            rep += self.nsr.toggle_sort() + "\n"
+        elif msg[:1] == "d" and self.nsr:
+            nzbnr = msg[2:].lstrip().rstrip()
+            rep += self.nsr.nzb_details(nzbnr) + "\n"
+        elif msg[:2] == "e!":
+            self.running = False
+        elif msg[:2] == "st":
+            rep += nzbget_status(self.maindir, self.furl, self.logger)
+        elif msg[:1] == "c" and self.nsr:
+            # c <NZBID> eltern/kinder <newname>
+            try:
+                strlist = msg[2:].lstrip().rstrip()
+                strlist = strlist.split(" ")
+                nzbid = int(strlist[0])
+                ek = strlist[1].lstrip().rstrip()
+                if ek not in ["eltern", "kinder"]:
+                    raise DHException("target1 must be 'eltern' or 'kinder'")
+                newname = strlist[2].lstrip().rstrip()
+                src = nzbget_getbyid(nzbid, self.furl, self.logger)
+                if not src:
+                    raise DHException("could not query this NZBID!")
+                # here: rename biggest file!!
+
+                if ek == "eltern":
+                    dst = "/media/cifs/filme/" + ek + "/Filme/Diverse/" + newname
+                else:
+                    dst = "/media/cifs/filme/" + ek + "/Filme/" + newname
+                self.logger.info("Copying " + src + " to " + dst + " ...")
+                shutil.copytree(src, dst)
+                self.logger.info("Copy done!")
+                rep += "copy done!\n"
+            except Exception as e:
+                rep += "cannot copy: " + str(e) + "\n"
+        elif msg[:1] == "s":
+            try:
+                qstr = re.findall(r'"([^"]*)"', msg[1:])[0]
+                if not getfromfile:
+                    try:
+                        fetch.tfetch_all_indexers(self.indexerdict,
+                                                  qstr,
+                                                  self.maindir,
+                                                  writetofile=True)
+                    except Exception as e:
+                        self.logger.error(
+                            str(e) +
+                            ": error in usenet search / indexer fetch!")
+                else:
+                    for idx_name, idx_obj in self.indexerdict.items():
+                        filename = self.maindir + idx_name + "_" + qstr + ".xml"
+                        idx_obj.get_xmltree_from_file(filename)
+                # merge into ONE search result list (of dict)
+                searchresult1 = []
+                for idx_name, idx_obj in self.indexerdict.items():
+                    try:
+                        idx_obj.analyze_search1()
+                        searchresult1.extend(idx_obj.search1_list)
+                    except Exception:
+                        pass
+                self.nsr = NewsSearchResult(searchresult1, self.maindir,
+                                            self.logger)
+                resstr = self.nsr.print_search_results()
+                rep += resstr
+            except Exception as e:
+                self.logger.error(str(e) + ": error in usenet search / etc. !")
+        elif msg[:1] == "l" and self.nsr:
+            resstr = self.nsr.print_search_results()
+            rep += resstr
+        elif msg[:1] == "h" and self.nsr:
+            rep += nzbget_history(self.nsr.rcodelist, self.furl, self.logger)
+        elif not self.nsr:
+            rep += "cannot execute as no search results available \n"
+        else:
+            rep += ("unknown command " + msg[:2] + "\n")
+        if msg[:2] != "e!":
+            rep += ("-" * 80 + "\n")
+            rep += self.motd
+        return rep
+
+
 class NewsSearchResult:
+
     def __init__(self, searchresultlist, maindir, logger):
         self.logger = logger
         self.searchresultlist = searchresultlist
@@ -72,17 +227,25 @@ class NewsSearchResult:
 
     def sort_search_results(self):
         if self.sort_toggle == 1:
-            self.searchresultlist = sorted(self.searchresultlist, key=lambda tup: tup["age"])
+            self.searchresultlist = sorted(self.searchresultlist,
+                                           key=lambda tup: tup["age"])
         elif self.sort_toggle == 2:
-            self.searchresultlist = sorted(self.searchresultlist, key=lambda tup: tup["age"], reverse=True)
+            self.searchresultlist = sorted(self.searchresultlist,
+                                           key=lambda tup: tup["age"],
+                                           reverse=True)
         elif self.sort_toggle == 3:
-            self.searchresultlist = sorted(self.searchresultlist, key=lambda tup: tup["length"])
+            self.searchresultlist = sorted(self.searchresultlist,
+                                           key=lambda tup: tup["length"])
         elif self.sort_toggle == 4:
-            self.searchresultlist = sorted(self.searchresultlist, key=lambda tup: tup["length"], reverse=True)
+            self.searchresultlist = sorted(self.searchresultlist,
+                                           key=lambda tup: tup["length"],
+                                           reverse=True)
         elif self.sort_toggle == 5:
-            self.searchresultlist = sorted(self.searchresultlist, key=lambda tup: tup["indexer"])
+            self.searchresultlist = sorted(self.searchresultlist,
+                                           key=lambda tup: tup["indexer"])
         elif self.sort_toggle == 6:
-            self.searchresultlist = sorted(self.searchresultlist, key=lambda tup: tup["title"])
+            self.searchresultlist = sorted(self.searchresultlist,
+                                           key=lambda tup: tup["title"])
 
     def toggle_sort(self):
         self.sort_toggle = self.sort_toggle + 1
@@ -119,7 +282,7 @@ class NewsSearchResult:
             return None
         if nzbnr < 1 or nzbnr > len(self.searchresultlist):
             return -1
-        nzb = self.searchresultlist[nzbnr-1]
+        nzb = self.searchresultlist[nzbnr - 1]
         return (nzb["title"])
 
     def download_nzb(self, nzbnr0, furl):
@@ -130,14 +293,15 @@ class NewsSearchResult:
             return ""
         if nzbnr < 1 or nzbnr > len(self.searchresultlist):
             return ""
-        nzb = self.searchresultlist[nzbnr-1]
+        nzb = self.searchresultlist[nzbnr - 1]
         f = furl
         try:
             title = nzb["title"]
             rpc = xmlrpc.client.ServerProxy(f.tostr())
             if not nzb["title"].endswith(".nzb"):
                 title += ".nzb"
-            rcode = rpc.append(title, nzb["url"], "", 0, False, False, "", 0, "SCORE", [])
+            rcode = rpc.append(title, nzb["url"], "", 0, False, False, "", 0,
+                               "SCORE", [])
             self.rcodelist.append((nzb["title"], rcode))
             self.logger.info("Downloading " + nzb["title"])
             return nzb["title"]
@@ -191,6 +355,7 @@ class NewsSearchResult:
 
 
 class Indexer:
+
     def __init__(self, name, url, apikey):
         self.name = name
         self.url = url
@@ -223,8 +388,14 @@ class Indexer:
             for d in item:
                 if d.tag == "pubDate":
                     pubdate = d.text
-                    itemdict["age"] = int((time.time() - time.mktime(email.utils.parsedate(pubdate)))/(3600*24))
-                elif d.tag in ["title", "link", "guid", "category", "description", "comments"]:
+                    itemdict["age"] = int(
+                        (time.time() -
+                         time.mktime(email.utils.parsedate(pubdate))) /
+                        (3600 * 24))
+                elif d.tag in [
+                        "title", "link", "guid", "category", "description",
+                        "comments"
+                ]:
                     itemdict[d.tag] = d.text
                 elif d.tag == "enclosure":
                     enclosure = d.attrib
@@ -276,182 +447,39 @@ def read_config(cfg_file, logger):
     return indexerdict, cfg
 
 
-class SigHandler:
-    def __init__(self, logger, tgram):
-        self.logger = logger
-        self.tgram = tgram
-
-    def sighandler(self, a, b):
-        self.logger.info("Received SIGINT/SIGTERM, terminating ...")
-        self.tgram.running = False
-
-
-def dhandler(msg0):
-    global tgbd
-    getfromfile = False
-    msg = msg0.lstrip()
-    rep = ""
-    if len(msg) < 1:
-        rep = "You have to enter a command!"
-        return rep
-    if msg[:2] == "dl" and tgbd.nsr:
-        nzbnr = msg[2:].lstrip().rstrip()
-        rep += "downloading " + str(nzbnr) + "\n"
-        rep += tgbd.nsr.download_nzb(nzbnr, tgbd.furl) + "\n"
-    elif msg[:1] == "t" and tgbd.nsr:
-        rep += tgbd.nsr.toggle_sort() + "\n"
-    elif msg[:1] == "d" and tgbd.nsr:
-        nzbnr = msg[2:].lstrip().rstrip()
-        rep += tgbd.nsr.nzb_details(nzbnr) + "\n"
-    elif msg[:2] == "e!":
-        tgbd.running = False
-    elif msg[:2] == "st":
-        rep += nzbget_status(tgbd.maindir, tgbd.furl, tgbd.logger)
-    elif msg[:1] == "c" and tgbd.nsr:
-        # c <NZBID> eltern/kinder <newname>
-        try:
-            strlist = msg[2:].lstrip().rstrip()
-            strlist = strlist.split(" ")
-            nzbid = int(strlist[0])
-            ek = strlist[1].lstrip().rstrip()
-            if ek not in ["eltern", "kinder"]:
-                raise DHException("target1 must be 'eltern' or 'kinder'")
-            newname = strlist[2].lstrip().rstrip()
-            src = nzbget_getbyid(nzbid, tgbd.furl, tgbd.logger)
-            if not src:
-                raise DHException("could not query this NZBID!")
-            # here: rename biggest file!!
-
-            if ek == "eltern":
-                dst = "/media/cifs/filme/" + ek + "/Filme/Diverse/" + newname
-            else:
-                dst = "/media/cifs/filme/" + ek + "/Filme/" + newname
-            tgbd.logger.info("Copying " + src + " to " + dst + " ...")
-            shutil.copytree(src, dst)
-            tgbd.logger.info("Copy done!")
-            rep += "copy done!\n"
-        except Exception as e:
-            rep += "cannot copy: " + str(e) + "\n"
-    elif msg[:1] == "s":
-        try:
-            qstr = re.findall(r'"([^"]*)"', msg[1:])[0]
-            if not getfromfile:
-                try:
-                    fetch.tfetch_all_indexers(tgbd.indexerdict, qstr, tgbd.maindir, writetofile=True)
-                except Exception as e:
-                    tgbd.logger.error(str(e) + ": error in usenet search / indexer fetch!")
-            else:
-                for idx_name, idx_obj in tgbd.indexerdict.items():
-                    filename = tgbd.maindir + idx_name + "_" + qstr + ".xml"
-                    idx_obj.get_xmltree_from_file(filename)
-            # merge into ONE search result list (of dict)
-            searchresult1 = []
-            #print(tgbd.indexerdict.items())
-            for idx_name, idx_obj in tgbd.indexerdict.items():
-                try:
-                    idx_obj.analyze_search1()
-                    searchresult1.extend(idx_obj.search1_list)
-                except Exception:
-                    pass
-            tgbd.nsr = NewsSearchResult(searchresult1, tgbd.maindir, tgbd.logger)
-            resstr = tgbd.nsr.print_search_results()
-            rep += resstr
-        except Exception as e:
-            tgbd.logger.error(str(e) + ": error in usenet search / etc. !")
-    elif msg[:1] == "l" and tgbd.nsr:
-        resstr = tgbd.nsr.print_search_results()
-        rep += resstr
-    elif msg[:1] == "h" and tgbd.nsr:
-        rep += nzbget_history(tgbd.nsr.rcodelist, tgbd.furl, tgbd.logger)
-    elif not tgbd.nsr:
-        rep += "cannot execute as no search results available \n"
-    else:
-        rep += ("unknown command " + msg[:2] + "\n")
-    if msg[:2] != "e!":
-        rep += ("-" * 80 + "\n")
-        rep += tgbd.motd
-    return rep
-
-
-async def dhecho(bot, update_id):
-    updates = await bot.get_updates(offset=update_id, timeout=10)
-    txt0 = ""
-    for update in updates:
-        next_update_id = update.update_id + 1
-        if update.message and update.message.text:
-            txt0 = update.message.text
-            rep = dhandler(txt0)
-            await update.message.reply_text(rep)     # update.message.text)
-        return next_update_id, txt0
-    return update_id, ""
-
-
-async def runbot():
-    global tgbd
-    async with Bot(tgbd.token) as bot:
-        try:
-            rep = "Welcome to dachshund V" + str(__version__) + " - usenet search telegram bot\n"
-            rep += tgbd.motd
-            for c in tgbd.chatids:
-                await bot.send_message(chat_id=c, text=rep)
-            try:
-                update_id = (await bot.get_updates())[0].update_id + 1
-            except IndexError:
-                update_id = None
-
-            tgbd.running = True
-            while tgbd.running:
-                try:
-                    update_id, txt0 = await dhecho(bot, update_id)
-                except telegram.error.NetworkError:
-                    await asyncio.sleep(1)
-                except telegram.error.Forbidden:
-                    # The user has removed or blocked the bot.
-                    update_id += 1
-                except Exception as e:
-                    print(str(e))
-                    break
-            rep = "Shutting down Dachshund by >e!< command "
-            for c in tgbd.chatids:
-                await bot.send_message(chat_id=c, text=rep)
-                await asyncio.sleep(1)
-        except asyncio.CancelledError:
-            rep = "Shutting down Dachshund by SIGTERM/systemctl stop"
-            for c in tgbd.chatids:
-                await bot.send_message(chat_id=c, text=rep)
-                await asyncio.sleep(1)
-        except Exception as e:
-            tgbd.logger.error(str(e) + " :error in running runbot, exiting ...")
-
-
 def run():
     # install_dir = os.path.dirname(os.path.realpath(__file__))
     userhome = expanduser("~")
     maindir = userhome + "/.dachshund/"
-    global tgbd
 
     # Init Logger
     logger = logging.getLogger("dh")
     logger.setLevel(logging.INFO)
     fh = logging.FileHandler(maindir + "dachshund.log", mode="w")
-    formatter = logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s')
+    formatter = logging.Formatter(
+        '%(asctime)s - %(name)s - %(levelname)s - %(message)s')
     fh.setFormatter(formatter)
     logger.addHandler(fh)
     logger.info("Dachshund " + __version__ + " started!")
 
     try:
         cfg_file = maindir + "dachshund.config"
-        tgbd = TelegramBotData(cfg_file, maindir, logger)
-        if not tgbd.initok:
-            logger.error(tgbd.errstr + " :cannot set up telegram bot thread, exiting ...")
-            print(tgbd.errstr + " :cannot set up telegram bot thread, exiting ...")
+        tgb = TelegramBot(cfg_file, maindir, logger)
+        if not tgb.initok:
+            logger.error(tgb.errstr +
+                         " :cannot set up telegram bot thread, exiting ...")
             return -1
-        asyncio.run(runbot())
-        logger.info("Telegram bot stopped, probably control command")
+        sh = SigHandler(logger, tgb)
+        signal.signal(signal.SIGINT, sh.sighandler)
+        signal.signal(signal.SIGTERM, sh.sighandler)
+        tgb.start()
+        while tgb.running:
+            time.sleep(0.1)
+        tgb.join()
+        logger.info("Telegram bot stopped!")
     except Exception as e:
-        logger.error(str(e) + " :cannot set up telegram bot thread, exiting ...")
-        print(str(e))
+        logger.error(
+            str(e) + " :cannot set up telegram bot thread, exiting ...")
         return -1
     logger.info("Telegram bot stopped, exiting Dachshund ...")
     return 1
-

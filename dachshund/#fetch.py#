@@ -12,7 +12,7 @@ class FetchThread(Thread):
 
     def run(self):
         try:
-            req = urllib.request.Request(
+            req = urllib.request.Request(g0
                 self.url, headers={"User-Agent": "Mozilla/5.0 (X11; Linux x86_64) "}
             )
             self.result = urllib.request.urlopen(req).read()

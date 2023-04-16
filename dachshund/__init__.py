@@ -16,7 +16,7 @@ def truncate_middle(s, n):
     n_2 = int(int(n) / 2 - 3)
     # whatever's left
     n_1 = int(n - n_2 - 3)
-    return '{0}...{1}'.format(s[:n_1], s[-n_2:])
+    return "{0}...{1}".format(s[:n_1], s[-n_2:])
 
 
 def nzbget_getbyid(nzbid, furl0, logger):
@@ -45,7 +45,17 @@ def nzbget_history(rcodelist, furl0, logger):
             matches = [title for title, rcode in rcodelist if nzbid == rcode]
             found_in_rcodelist = len(matches) > 0
             if found_in_rcodelist:
-                rep += "[" + str(nzbid) + "] " + h["Name"] + " / " + h["Status"] + " / " + h["DestDir"] + "\n"
+                rep += (
+                    "["
+                    + str(nzbid)
+                    + "] "
+                    + h["Name"]
+                    + " / "
+                    + h["Status"]
+                    + " / "
+                    + h["DestDir"]
+                    + "\n"
+                )
         if rep:
             rep = rep[:-2]
         else:
@@ -68,15 +78,29 @@ def nzbget_status(maindir, furl0, logger):
         with open(maindir + "nzbget.groups", "w") as gf:
             gf.write(str(groups))
         res = ""
-        res += "Overall remaining: " + str(make_pretty_bytes(status["RemainingSizeLo"])) + "\n"
+        res += (
+            "Overall remaining: "
+            + str(make_pretty_bytes(status["RemainingSizeLo"]))
+            + "\n"
+        )
         dlr = "%.1f" % ((status["DownloadRate"] / (1024 * 1024)) * 8) + " MBit"
         res += "Download rate:     " + dlr + "\n"
         for i, g in enumerate(groups):
             size = str(g["FileSizeMB"]) + "M"
             rem = str(g["RemainingSizeMB"] - g["PausedSizeMB"]) + "M"
-            nr = truncate_middle("[" + str(i+1) + "]", 5)
-            res += nr + truncate_middle(g["NZBFilename"], 40) + " (" + g["Status"] + ") / " + rem + " of " + size + "\n"
-        #for sv in servervolumes:
+            nr = truncate_middle("[" + str(i + 1) + "]", 5)
+            res += (
+                nr
+                + truncate_middle(g["NZBFilename"], 40)
+                + " ("
+                + g["Status"]
+                + ") / "
+                + rem
+                + " of "
+                + size
+                + "\n"
+            )
+        # for sv in servervolumes:
         #    svid = sv["ServerID"]
         #    bps = sv["BytesPerSeconds"]
         #    bpslist = [int((bp0["SizeLo"]/(1024*1024))*8) for bp0 in bps]
