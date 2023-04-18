@@ -6,8 +6,15 @@ import configparser
 import email.utils
 import time
 from furl import furl
-from dachshund import fetch, nzbget_status, is_same, make_pretty_bytes, truncate_middle, nzbget_history,\
-    nzbget_getbyid
+from dachshund import (
+    fetch,
+    nzbget_status,
+    is_same,
+    make_pretty_bytes,
+    truncate_middle,
+    nzbget_history,
+    nzbget_getbyid,
+)
 import xml.etree.ElementTree as ET
 import xmlrpc.client
 import json
@@ -17,11 +24,11 @@ import logging.handlers
 import fridagram as fg
 from threading import Thread
 
-__version__ = "1.2"
+__version__ = "1.3"
+_HEARTBEAT_FRQ = 3  # heartbeat frequency in minutes
 
 
 class SigHandler:
-
     def __init__(self, logger, tgb):
         self.logger = logger
         self.tgb = tgb
@@ -36,7 +43,6 @@ class DHException(Exception):
 
 
 class TelegramBotData:
-
     def __init__(self, cfg_file, maindir, logger):
         try:
             self.logger = logger
@@ -53,7 +59,9 @@ class TelegramBotData:
             self.furl.password = self.cfg["NZBGET"]["PASSWORD"]
             self.furl.path.add("xmlrpc")
             self.chatids = json.loads(self.cfg.get("TELEGRAM", "CHATIDS"))
-            self.motd = 'd <nr>: details / dl <nr>: download nzb / l: list / s "...": search\n'
+            self.motd = (
+                'd <nr>: details / dl <nr>: download nzb / l: list / s "...": search\n'
+            )
             self.motd += "t: toggle search / e!: exit / st: nzbget status / h history\n"
             self.motd += "c <nzbid> eltern/kinder <newname>: copy to plex\n"
             self.initok = True
@@ -65,7 +73,6 @@ class TelegramBotData:
 
 
 class TelegramBot(Thread):
-
     def __init__(self, cfg_file, maindir, logger):
         Thread.__init__(self)
         try:
@@ -83,7 +90,9 @@ class TelegramBot(Thread):
             self.furl.password = self.cfg["NZBGET"]["PASSWORD"]
             self.furl.path.add("xmlrpc")
             self.chatids = json.loads(self.cfg.get("TELEGRAM", "CHATIDS"))
-            self.motd = 'd <nr>: details / dl <nr>: download nzb / l: list / s "...": search\n'
+            self.motd = (
+                'd <nr>: details / dl <nr>: download nzb / l: list / s "...": search\n'
+            )
             self.motd += "t: toggle search / e!: exit / st: nzbget status / h history\n"
             self.motd += "c <nzbid> eltern/kinder <newname>: copy to plex\n"
             self.initok = True
@@ -95,25 +104,50 @@ class TelegramBot(Thread):
             self.errstr = str(e)
 
     def run(self):
-        rep = "Welcome to dachshund V" + str(
-            __version__) + " - usenet search telegram bot\n"
+        rep = (
+            "Welcome to dachshund V"
+            + str(__version__)
+            + " - usenet search telegram bot\n"
+        )
         rep += self.motd
         for c in self.chatids:
             fg.send_message(self.token, self.chatids, rep)
 
-        self.running = True
-        while self.running:
-            ok, rlist = fg.receive_message(self.token)
-            if ok and rlist:
-                for chat_id, text in rlist:
-                    if text == "/exit":
+        self.logger.info("Sending first getme - heartbeat to bot ...")
+        heartbeat_answer = fg.get_me(self.token)
+        if not heartbeat_answer:
+            self.logger.error("Received no answer on first getme, exiting ...")
+            self.running = False
+            rep = "Shutting down Dachshund on first getme - error!"
+        else:
+            self.logger.info("Received answer on first getme: " + str(heartbeat_answer))
+            lastt0 = time.time()
+            self.running = True
+            while self.running:
+                ok, rlist = fg.receive_message(self.token)
+                if ok and rlist:
+                    lastt0 = time.time()
+                    for chat_id, text in rlist:
+                        self.logger.info("Received message >" + text + "<")
+                        if text.lstrip() in ["/exit", "e!"]:
+                            rep = "Shutting down Dachshund regularely on e! or /exit..."
+                            self.running = False
+                        else:
+                            rep = self.dhandler(text)
+                            fg.send_message(self.token, [chat_id], rep)
+                elif time.time() - lastt0 > _HEARTBEAT_FRQ * 60:
+                    self.logger.info("Sending getme - heartbeat to bot ...")
+                    heartbeat_answer = fg.get_me(self.token)
+                    if not heartbeat_answer:
+                        self.logger.error("Received no answer on getme, exiting ...")
                         self.running = False
+                        rep = "Shutting down Dachshund on missing getme - heartbeat ..."
                     else:
-                        rep = self.dhandler(text)
-                        fg.send_message(self.token, [chat_id], rep)
-            if self.running:
-                time.sleep(0.1)
-        rep = "Shutting down Dachshund..."
+                        self.logger.info(
+                            "Received answer on getme: " + str(heartbeat_answer)
+                        )
+                        lastt0 = time.time()
+                time.sleep(0.5)
         for c in self.chatids:
             fg.send_message(self.token, self.chatids, rep)
 
@@ -133,8 +167,6 @@ class TelegramBot(Thread):
         elif msg[:1] == "d" and self.nsr:
             nzbnr = msg[2:].lstrip().rstrip()
             rep += self.nsr.nzb_details(nzbnr) + "\n"
-        elif msg[:2] == "e!":
-            self.running = False
         elif msg[:2] == "st":
             rep += nzbget_status(self.maindir, self.furl, self.logger)
         elif msg[:1] == "c" and self.nsr:
@@ -167,14 +199,13 @@ class TelegramBot(Thread):
                 qstr = re.findall(r'"([^"]*)"', msg[1:])[0]
                 if not getfromfile:
                     try:
-                        fetch.tfetch_all_indexers(self.indexerdict,
-                                                  qstr,
-                                                  self.maindir,
-                                                  writetofile=True)
+                        fetch.tfetch_all_indexers(
+                            self.indexerdict, qstr, self.maindir, writetofile=True
+                        )
                     except Exception as e:
                         self.logger.error(
-                            str(e) +
-                            ": error in usenet search / indexer fetch!")
+                            str(e) + ": error in usenet search / indexer fetch!"
+                        )
                 else:
                     for idx_name, idx_obj in self.indexerdict.items():
                         filename = self.maindir + idx_name + "_" + qstr + ".xml"
@@ -187,8 +218,7 @@ class TelegramBot(Thread):
                         searchresult1.extend(idx_obj.search1_list)
                     except Exception:
                         pass
-                self.nsr = NewsSearchResult(searchresult1, self.maindir,
-                                            self.logger)
+                self.nsr = NewsSearchResult(searchresult1, self.maindir, self.logger)
                 resstr = self.nsr.print_search_results()
                 rep += resstr
             except Exception as e:
@@ -201,15 +231,14 @@ class TelegramBot(Thread):
         elif not self.nsr:
             rep += "cannot execute as no search results available \n"
         else:
-            rep += ("unknown command " + msg[:2] + "\n")
+            rep += "unknown command " + msg[:2] + "\n"
         if msg[:2] != "e!":
-            rep += ("-" * 80 + "\n")
+            rep += "-" * 80 + "\n"
             rep += self.motd
         return rep
 
 
 class NewsSearchResult:
-
     def __init__(self, searchresultlist, maindir, logger):
         self.logger = logger
         self.searchresultlist = searchresultlist
@@ -227,25 +256,29 @@ class NewsSearchResult:
 
     def sort_search_results(self):
         if self.sort_toggle == 1:
-            self.searchresultlist = sorted(self.searchresultlist,
-                                           key=lambda tup: tup["age"])
+            self.searchresultlist = sorted(
+                self.searchresultlist, key=lambda tup: tup["age"]
+            )
         elif self.sort_toggle == 2:
-            self.searchresultlist = sorted(self.searchresultlist,
-                                           key=lambda tup: tup["age"],
-                                           reverse=True)
+            self.searchresultlist = sorted(
+                self.searchresultlist, key=lambda tup: tup["age"], reverse=True
+            )
         elif self.sort_toggle == 3:
-            self.searchresultlist = sorted(self.searchresultlist,
-                                           key=lambda tup: tup["length"])
+            self.searchresultlist = sorted(
+                self.searchresultlist, key=lambda tup: tup["length"]
+            )
         elif self.sort_toggle == 4:
-            self.searchresultlist = sorted(self.searchresultlist,
-                                           key=lambda tup: tup["length"],
-                                           reverse=True)
+            self.searchresultlist = sorted(
+                self.searchresultlist, key=lambda tup: tup["length"], reverse=True
+            )
         elif self.sort_toggle == 5:
-            self.searchresultlist = sorted(self.searchresultlist,
-                                           key=lambda tup: tup["indexer"])
+            self.searchresultlist = sorted(
+                self.searchresultlist, key=lambda tup: tup["indexer"]
+            )
         elif self.sort_toggle == 6:
-            self.searchresultlist = sorted(self.searchresultlist,
-                                           key=lambda tup: tup["title"])
+            self.searchresultlist = sorted(
+                self.searchresultlist, key=lambda tup: tup["title"]
+            )
 
     def toggle_sort(self):
         self.sort_toggle = self.sort_toggle + 1
@@ -283,7 +316,7 @@ class NewsSearchResult:
         if nzbnr < 1 or nzbnr > len(self.searchresultlist):
             return -1
         nzb = self.searchresultlist[nzbnr - 1]
-        return (nzb["title"])
+        return nzb["title"]
 
     def download_nzb(self, nzbnr0, furl):
         try:
@@ -300,8 +333,9 @@ class NewsSearchResult:
             rpc = xmlrpc.client.ServerProxy(f.tostr())
             if not nzb["title"].endswith(".nzb"):
                 title += ".nzb"
-            rcode = rpc.append(title, nzb["url"], "", 0, False, False, "", 0,
-                               "SCORE", [])
+            rcode = rpc.append(
+                title, nzb["url"], "", 0, False, False, "", 0, "SCORE", []
+            )
             self.rcodelist.append((nzb["title"], rcode))
             self.logger.info("Downloading " + nzb["title"])
             return nzb["title"]
@@ -346,7 +380,9 @@ class NewsSearchResult:
             ell_age = truncate_middle(str(s["age"]) + "d", 5)
             size = s["length"]
             ell_size = make_pretty_bytes(size)
-            res += ell_nr + ell_idx + " " + ell_title + " / " + ell_age + " / " + ell_size
+            res += (
+                ell_nr + ell_idx + " " + ell_title + " / " + ell_age + " / " + ell_size
+            )
             if nr > 30:
                 break
         if res[:-1] == "\n":
@@ -355,7 +391,6 @@ class NewsSearchResult:
 
 
 class Indexer:
-
     def __init__(self, name, url, apikey):
         self.name = name
         self.url = url
@@ -367,11 +402,15 @@ class Indexer:
         self.xmltree = None
 
     def build_all_search_url(self, qstr):
-        self.all_search_url = self.url + "/api?t=search&apikey=" + self.apikey + "&q=" + qstr
+        self.all_search_url = (
+            self.url + "/api?t=search&apikey=" + self.apikey + "&q=" + qstr
+        )
         return self.all_search_url
 
     def build_details_url(self, qstr):
-        self.details_url = self.url + "/api?t=details&apikey=" + self.apikey + "&id=" + qstr
+        self.details_url = (
+            self.url + "/api?t=details&apikey=" + self.apikey + "&id=" + qstr
+        )
         return self.details_url
 
     def get_xmltree_from_file(self, filename):
@@ -389,12 +428,16 @@ class Indexer:
                 if d.tag == "pubDate":
                     pubdate = d.text
                     itemdict["age"] = int(
-                        (time.time() -
-                         time.mktime(email.utils.parsedate(pubdate))) /
-                        (3600 * 24))
+                        (time.time() - time.mktime(email.utils.parsedate(pubdate)))
+                        / (3600 * 24)
+                    )
                 elif d.tag in [
-                        "title", "link", "guid", "category", "description",
-                        "comments"
+                    "title",
+                    "link",
+                    "guid",
+                    "category",
+                    "description",
+                    "comments",
                 ]:
                     itemdict[d.tag] = d.text
                 elif d.tag == "enclosure":
@@ -457,7 +500,8 @@ def run():
     logger.setLevel(logging.INFO)
     fh = logging.FileHandler(maindir + "dachshund.log", mode="w")
     formatter = logging.Formatter(
-        '%(asctime)s - %(name)s - %(levelname)s - %(message)s')
+        "%(asctime)s - %(name)s - %(levelname)s - %(message)s"
+    )
     fh.setFormatter(formatter)
     logger.addHandler(fh)
     logger.info("Dachshund " + __version__ + " started!")
@@ -466,20 +510,18 @@ def run():
         cfg_file = maindir + "dachshund.config"
         tgb = TelegramBot(cfg_file, maindir, logger)
         if not tgb.initok:
-            logger.error(tgb.errstr +
-                         " :cannot set up telegram bot thread, exiting ...")
+            logger.error(
+                tgb.errstr + " :cannot set up telegram bot thread, exiting ..."
+            )
             return -1
         sh = SigHandler(logger, tgb)
         signal.signal(signal.SIGINT, sh.sighandler)
         signal.signal(signal.SIGTERM, sh.sighandler)
         tgb.start()
-        while tgb.running:
-            time.sleep(0.1)
         tgb.join()
         logger.info("Telegram bot stopped!")
     except Exception as e:
-        logger.error(
-            str(e) + " :cannot set up telegram bot thread, exiting ...")
+        logger.error(str(e) + " :cannot set up telegram bot thread, exiting ...")
         return -1
     logger.info("Telegram bot stopped, exiting Dachshund ...")
     return 1
