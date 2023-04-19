@@ -123,6 +123,7 @@ class TelegramBot(Thread):
             self.logger.info("Received answer on first getme: " + str(heartbeat_answer))
             lastt0 = time.time()
             self.running = True
+            self.heartbeatok = True
             while self.running:
                 ok, rlist = fg.receive_message(self.token)
                 if ok and rlist:
@@ -139,14 +140,16 @@ class TelegramBot(Thread):
                     self.logger.info("Sending getme - heartbeat to bot ...")
                     heartbeat_answer = fg.get_me(self.token)
                     if not heartbeat_answer:
-                        self.logger.error("Received no answer on getme, exiting ...")
-                        self.running = False
-                        rep = "Shutting down Dachshund on missing getme - heartbeat ..."
+                        self.logger.warning(
+                            "Received no answer on getme, trying again ..."
+                        )
+                        # self.running = False
+                        # rep = "Shutting down Dachshund on missing getme - heartbeat ..."
                     else:
                         self.logger.info(
                             "Received answer on getme: " + str(heartbeat_answer)
                         )
-                        lastt0 = time.time()
+                    lastt0 = time.time()
                 time.sleep(0.5)
         for c in self.chatids:
             fg.send_message(self.token, self.chatids, rep)
