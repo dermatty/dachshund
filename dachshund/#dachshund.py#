@@ -517,6 +517,7 @@ def run():
     logger = logging.getLogger("dh")
     logger.setLevel(logging.DEBUG)
     fh = logging.FileHandler(maindir + "dachshund.log", mode="w")
+    # fh = log
     formatter = logging.Formatter(
         "%(asctime)s - %(name)s - %(levelname)s - %(message)s"
     )

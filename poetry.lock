@@ -382,14 +382,14 @@ pyflakes = ">=3.0.0,<3.1.0"
 
 [[package]]
 name = "fridagram"
-version = "0.1.6"
+version = "0.1.7"
 description = ""
 category = "main"
 optional = false
 python-versions = ">=3.11,<4.0"
 files = [
-    {file = "fridagram-0.1.6-py3-none-any.whl", hash = "sha256:a261297fa34e49a6ea2917f9d535f655c8f42cb1c385f9e0ead05799428ebb7f"},
-    {file = "fridagram-0.1.6.tar.gz", hash = "sha256:8816b11304a79feadd8fba3eeee701f56b593a4018667e589900912098e2f041"},
+    {file = "fridagram-0.1.7-py3-none-any.whl", hash = "sha256:b0d1e32c8fff336ad96fd84d75a305fae6e3a7c53fdb535ba867c50d1ce64d9f"},
+    {file = "fridagram-0.1.7.tar.gz", hash = "sha256:0cea83274b61bdcc8fe047f8baee23d3a2867a75c41dc4027c0a0c618b2959a2"},
 ]
 
 [package.dependencies]
