@@ -140,12 +140,17 @@ class TelegramBot(Thread):
                     if ok and rlist:
                         lastt0 = time.time()
                         for chat_id, text in rlist:
+                            text = str(text)
                             self.logger.info("Received message >" + text + "<")
                             if text.lstrip() in ["/exit", "e!"]:
                                 rep = "Shutting down Dachshund regularely on e! or /exit..."
                                 self.running = False
                             else:
-                                rep = self.dhandler(text)
+                                try:
+                                    rep = self.dhandler(text)
+                                except Exception as e:
+                                    self.logger.error("Error in dhandler: " + str(e))
+                                    rep = "Error, cannot execute command ..."
                                 fg.send_message(self.token, [chat_id], rep)
                     elif time.time() - lastt0 > _HEARTBEAT_FRQ * 60 or not ok:
                         self.logger.info("Sending getme - heartbeat to bot ...")
@@ -517,6 +522,7 @@ def run():
     logger = logging.getLogger("dh")
     logger.setLevel(logging.DEBUG)
     fh = logging.FileHandler(maindir + "dachshund.log", mode="w")
+    # fh = logging.TimedRotatingFileHandler(maindir + "dachshund.log", when="D", interval=7, backupCount=3)
     formatter = logging.Formatter(
         "%(asctime)s - %(name)s - %(levelname)s - %(message)s"
     )

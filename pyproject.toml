@@ -1,6 +1,6 @@
 [tool.poetry]
 name = "dachshund"
-version = "1.3.3"
+version = "1.3.6"
 description = "usenet searching telegram bot"
 authors = ["dermatty <stephan@untergrabner.at>"]
 license = "GPL v3"
