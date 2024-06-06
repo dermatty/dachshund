@@ -24,7 +24,7 @@ import logging.handlers
 import fridagram as fg
 from threading import Thread
 
-__version__ = "1.3"
+__version__ = "1.3.7"
 _HEARTBEAT_FRQ = 3  # heartbeat frequency in minutes
 
 
